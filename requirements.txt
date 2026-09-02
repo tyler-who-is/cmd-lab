@@ -1,0 +1,7 @@
+astropy
+photutils
+astroalign
+pandas
+matplotlib
+streamlit
+plotly

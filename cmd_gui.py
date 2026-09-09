@@ -28,7 +28,7 @@ st.set_page_config(page_title="CMD Pipeline", page_icon="⭐", layout="wide")
 # ── session state ─────────────────────────────────────────────────────────
 for _k, _v in [("stacks", None), ("stars", []),
                 ("cmd_base", None), ("next_id", 0),
-                ("plate_matches", None)]:
+                ("plate_matches", None), ("click_xy", None)]:
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
@@ -538,6 +538,15 @@ if stacks is not None:
                     x1=s["x"]+r_out, y1=s["y"]+r_out,
                     line=dict(color="gold", width=1, dash="dot"))
 
+        _cxy = st.session_state.get("click_xy")
+        if _cxy:
+            fig_map.add_trace(go.Scatter(
+                x=[_cxy[0]], y=[_cxy[1]], mode="markers",
+                marker=dict(size=18, color="red", symbol="x-thin",
+                            line=dict(width=3, color="red")),
+                showlegend=False, hoverinfo="skip",
+            ))
+
         fig_map.update_layout(
             width=560, height=560,
             xaxis=dict(title="X (px)", constrain="domain", range=[-5, w+5]),
@@ -546,50 +555,65 @@ if stacks is not None:
             showlegend=False,
             margin=dict(l=50, r=10, t=10, b=50),
             dragmode="zoom",
+            clickmode="event+select",
         )
-        st.plotly_chart(fig_map, key="star_map")
-        st.caption(f"🟢 초록 = 측정된 별  |  이미지: {w}×{h} px (bin={bfac})")
+        _event = st.plotly_chart(fig_map, on_select="rerun",
+                                 selection_mode="points", key="star_map")
+        if _event and _event.selection and _event.selection.points:
+            for _pt in _event.selection.points:
+                if _pt.get("curve_number", -1) == 0:
+                    st.session_state.click_xy = (
+                        float(_pt["x"]), float(_pt["y"]))
+                    break
+        st.caption(f"👆 **별을 클릭하세요**  |  🟢 측정됨  🔴 선택  "
+                   f"|  {w}×{h} px (bin={bfac})")
 
     # ── measurement controls ──────────────────────────────────
     with col_ctrl:
-        st.markdown("**별 위치 입력**")
-        st.caption("이미지 위에 마우스를 올리면 좌표가 보입니다")
-        mc1, mc2 = st.columns(2)
-        with mc1:
-            inp_x = st.number_input("X", value=w // 2, min_value=0,
-                                    max_value=w - 1, key="inp_x")
-        with mc2:
-            inp_y = st.number_input("Y", value=h // 2, min_value=0,
-                                    max_value=h - 1, key="inp_y")
+        _cxy = st.session_state.get("click_xy")
+        if _cxy:
+            inp_x, inp_y = _cxy
+            inp_x = max(0, min(int(round(inp_x)), w - 1))
+            inp_y = max(0, min(int(round(inp_y)), h - 1))
+            st.markdown(f"**선택 위치: ({inp_x}, {inp_y})**")
 
-        # preview cutout at entered position
-        fig_cut = _cutout_fig(stack_V, inp_x, inp_y, r_ap, r_in, r_out)
-        st.pyplot(fig_cut)
-        plt.close(fig_cut)
-        st.caption("🟢 구경  🟡 배경고리  🔴 입력 위치")
+            fig_cut = _cutout_fig(stack_V, inp_x, inp_y, r_ap, r_in, r_out)
+            st.pyplot(fig_cut)
+            plt.close(fig_cut)
+            st.caption("🟢 구경  🟡 배경고리  🔴 선택 위치")
 
-        if st.button("⭐ 별 측정", type="primary", use_container_width=True):
-            cx, cy = _find_centroid(stack_V, inp_x, inp_y, centroid_box)
-            mV, fV, snr_V = _measure_star(stack_V, cx, cy, r_ap, r_in, r_out)
-            mB, fB, snr_B = _measure_star(stack_B, cx, cy, r_ap, r_in, r_out)
-            sid = st.session_state.next_id
-            st.session_state.next_id += 1
-            st.session_state.stars.append({
-                "id": sid,
-                "x": round(cx, 2), "y": round(cy, 2),
-                "instr_V": round(mV, 4) if np.isfinite(mV) else np.nan,
-                "instr_B": round(mB, 4) if np.isfinite(mB) else np.nan,
-                "snr_V": round(snr_V, 1),
-            })
-            if np.isfinite(mV):
-                st.success(f"별 #{sid} 측정 완료!  "
-                           f"V={mV:.3f}  B={mB:.3f}  B-V={mB-mV:.3f}  "
-                           f"SNR={snr_V:.0f}")
-                if abs(cx - inp_x) > 0.5 or abs(cy - inp_y) > 0.5:
-                    st.caption(f"중심 보정: ({inp_x}, {inp_y}) → ({cx:.1f}, {cy:.1f})")
-            else:
-                st.warning(f"별 #{sid}: 유효한 플럭스 없음 (구경/위치 확인)")
-            st.rerun()
+            if st.button("⭐ 별 측정", type="primary",
+                         use_container_width=True):
+                cx, cy = _find_centroid(stack_V, inp_x, inp_y, centroid_box)
+                mV, fV, snr_V = _measure_star(stack_V, cx, cy,
+                                               r_ap, r_in, r_out)
+                mB, fB, snr_B = _measure_star(stack_B, cx, cy,
+                                               r_ap, r_in, r_out)
+                sid = st.session_state.next_id
+                st.session_state.next_id += 1
+                st.session_state.stars.append({
+                    "id": sid,
+                    "x": round(cx, 2), "y": round(cy, 2),
+                    "instr_V": round(mV, 4) if np.isfinite(mV) else np.nan,
+                    "instr_B": round(mB, 4) if np.isfinite(mB) else np.nan,
+                    "snr_V": round(snr_V, 1),
+                })
+                if np.isfinite(mV):
+                    st.success(
+                        f"별 #{sid} 측정 완료!  "
+                        f"V={mV:.3f}  B={mB:.3f}  B-V={mB-mV:.3f}  "
+                        f"SNR={snr_V:.0f}")
+                    if abs(cx - inp_x) > 0.5 or abs(cy - inp_y) > 0.5:
+                        st.caption(
+                            f"중심 보정: ({inp_x}, {inp_y}) → "
+                            f"({cx:.1f}, {cy:.1f})")
+                else:
+                    st.warning(
+                        f"별 #{sid}: 유효한 플럭스 없음 (구경/위치 확인)")
+                st.session_state.click_xy = None
+                st.rerun()
+        else:
+            st.info("👆 왼쪽 이미지에서 별을 클릭하세요")
 
         # ── star list ──────────────────────────────────────────
         st.divider()

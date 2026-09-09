@@ -26,7 +26,7 @@ st.set_page_config(page_title="CMD Pipeline", page_icon="⭐", layout="wide")
 
 # ── session state ─────────────────────────────────────────────────────────
 for _k, _v in [("stacks", None), ("stars", []),
-                ("cal", None), ("next_id", 0)]:
+                ("cmd_base", None), ("next_id", 0)]:
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
@@ -202,6 +202,49 @@ def _explain_extinction(ebv, A_V, A_B):
             f"보입니다. E(B-V)={ebv}로 A_V={A_V:.3f}, A_B={A_B:.3f} 만큼 보정합니다.")
 
 
+# ── turnoff age table ────────────────────────────────────────────────────
+_TURNOFF_DATA = [
+    (-0.33, "O5V",  4),    (-0.30, "B0V",  11),   (-0.28, "B1V",  16),
+    (-0.22, "B2V",  32),   (-0.16, "B5V",  100),  (-0.11, "B8V",  200),
+    (0.00,  "A0V",  350),  (0.16,  "A5V",  1000), (0.30,  "F0V",  2500),
+    (0.44,  "F5V",  4500), (0.59,  "G0V",  8000), (0.65,  "G2V",  10000),
+    (0.82,  "K0V",  17000),(1.15,  "K5V",  35000),(1.42,  "M0V",  70000),
+]
+_TO_BV   = np.array([t[0] for t in _TURNOFF_DATA])
+_TO_SPT  = [t[1] for t in _TURNOFF_DATA]
+_TO_LAGE = np.log10(np.array([t[2] for t in _TURNOFF_DATA], dtype=float))
+
+
+def _turnoff_age(bv):
+    log_age = float(np.interp(bv, _TO_BV, _TO_LAGE))
+    idx = int(np.argmin(np.abs(_TO_BV - bv)))
+    return 10 ** log_age, _TO_SPT[idx]
+
+
+def _format_age(age_myr):
+    if age_myr < 1000:
+        return f"~{age_myr:.0f} Myr"
+    return f"~{age_myr / 1000:.1f} Gyr"
+
+
+def _auto_fit_cb():
+    base = st.session_state.get("cmd_base")
+    if base is None or not base["calibrated"]:
+        return
+    ebv = st.session_state.get("fit_ebv_sl", 0.0)
+    mV = np.array(base["mag_V"])
+    mB = np.array(base["mag_B"])
+    mem = np.array(base["is_member"])
+    zpV, zpB = base["zp_V"], base["zp_B"]
+    A_V = 3.1 * ebv
+    Vt = (mV + zpV) - A_V
+    BVt = ((mB + zpB) - (mV + zpV)) - ebv
+    zams = pipe.load_zams()
+    mu_a, _ = pipe.fit_distance_modulus(BVt[mem], Vt[mem], zams)
+    if mu_a is not None:
+        st.session_state.fit_mu_sl = round(float(mu_a), 2)
+
+
 # ── sidebar ───────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("⭐ CMD Pipeline")
@@ -301,7 +344,7 @@ if stack_clicked:
                 "log_text": "\n".join(log_lines),
             }
             st.session_state.stars = []
-            st.session_state.cal = None
+            st.session_state.cmd_base = None
             st.session_state.next_id = 0
         except Exception as e:
             st.error(f"스택 오류: {e}")
@@ -336,7 +379,7 @@ if csv_load_clicked:
                         "snr_V": 0.0,
                     })
                 st.session_state.stars = star_list
-                st.session_state.cal = None
+                st.session_state.cmd_base = None
                 st.success(f"CSV에서 {len(star_list)}개 별 로드 완료")
         except Exception as e:
             st.error(f"CSV 오류: {e}")
@@ -492,33 +535,31 @@ if stacks is not None:
             if st.button("🗑️ 전체 초기화", use_container_width=True):
                 st.session_state.stars = []
                 st.session_state.next_id = 0
-                st.session_state.cal = None
+                st.session_state.cmd_base = None
                 st.rerun()
         else:
             st.info("아직 측정된 별이 없습니다. 위에서 좌표를 입력하고 '별 측정'을 눌러주세요.")
 
     # ══════════════════════════════════════════════════════════
-    # CMD GENERATION & CALIBRATION
+    # CMD GENERATION
     # ══════════════════════════════════════════════════════════
     valid_stars = [s for s in stars
                    if np.isfinite(s["instr_V"]) and np.isfinite(s["instr_B"])]
 
     if len(valid_stars) >= 2:
         st.divider()
-        st.subheader("📊 CMD 생성 & 등급 보정")
+        st.subheader("📊 CMD 생성 & 주계열 맞추기")
 
-        col_cmd, col_cal = st.columns([5, 3])
-
-        with col_cal:
+        col_ref, col_gen = st.columns([3, 5])
+        with col_ref:
             st.markdown("**기준별 보정 (선택사항)**")
-            st.caption("보정 없이 기기등급 CMD만 보려면 'CMD 생성'만 누르세요")
-
+            st.caption("실제 등급을 모르면 빈칸 → 기기등급 CMD만 생성")
             ref_ids = [s["id"] for s in valid_stars]
-            ref_sel = st.selectbox("기준별 #", ref_ids, index=0, key="ref_star_sel")
+            ref_sel = st.selectbox("기준별 #", ref_ids, index=0,
+                                   key="ref_star_sel")
             ref_star = next(s for s in valid_stars if s["id"] == ref_sel)
             st.caption(f"기기 V={ref_star['instr_V']:.3f}  "
                        f"B={ref_star['instr_B']:.3f}")
-
             mc1, mc2 = st.columns(2)
             with mc1:
                 cal_V = st.number_input("실제 V", value=0.0, format="%.3f",
@@ -526,155 +567,228 @@ if stacks is not None:
             with mc2:
                 cal_B = st.number_input("실제 B", value=0.0, format="%.3f",
                                         key="cal_B")
-
-            cal_ebv = st.number_input("E(B−V)", value=0.0, min_value=0.0,
-                                      format="%.3f", key="cal_ebv")
-            cal_rv = st.number_input("R_V", value=3.1, format="%.2f", key="cal_rv")
-            cal_dist = st.number_input("성단 거리 (pc, 0=자동)",
-                                       value=0.0, min_value=0.0,
-                                       format="%.1f", key="cal_dist")
-
             do_calibrate = cal_V != 0.0 or cal_B != 0.0
-
-        with col_cmd:
+        with col_gen:
             gen_clicked = st.button("📊 CMD 생성", type="primary",
                                     use_container_width=True)
 
         if gen_clicked:
             os.makedirs(out_dir, exist_ok=True)
-            positions = np.array([[s["x"], s["y"]] for s in valid_stars])
-            mag_V = np.array([s["instr_V"] for s in valid_stars])
-            mag_B = np.array([s["instr_B"] for s in valid_stars])
-            ids = np.array([s["id"] for s in valid_stars])
-
-            cx, cy = w / 2.0, h / 2.0
-            rdist = np.sqrt((positions[:, 0] - cx)**2 + (positions[:, 1] - cy)**2)
-            is_member = rdist <= (member_frac * min(h, w))
-
-            explain_entries = [_EXPLAIN[1], _EXPLAIN[2], _EXPLAIN[34]]
+            _pos = np.array([[s["x"], s["y"]] for s in valid_stars])
+            _mV = np.array([s["instr_V"] for s in valid_stars])
+            _mB = np.array([s["instr_B"] for s in valid_stars])
+            _ids = np.array([s["id"] for s in valid_stars])
+            _cx, _cy = w / 2.0, h / 2.0
+            _rd = np.sqrt((_pos[:, 0] - _cx)**2 + (_pos[:, 1] - _cy)**2)
+            _mem = _rd <= (member_frac * min(h, w))
 
             if do_calibrate:
-                ref_idx = next(i for i, s in enumerate(valid_stars)
-                               if s["id"] == ref_sel)
-                zp_V = cal_V - mag_V[ref_idx]
-                zp_B = cal_B - mag_B[ref_idx]
-                A_V = cal_rv * cal_ebv
-                A_B = A_V + cal_ebv
-                V_col = (mag_V + zp_V) - A_V
-                BV_col = ((mag_B + zp_B) - (mag_V + zp_V)) - cal_ebv
-
-                explain_entries.append(_EXPLAIN[5])
-                if cal_ebv > 0:
-                    explain_entries.append(_explain_extinction(cal_ebv, A_V, A_B))
-
-                df_cmd = pd.DataFrame({
-                    "id": ids,
-                    "x": positions[:, 0] * bfac,
-                    "y": positions[:, 1] * bfac,
-                    "instr_V": mag_V, "instr_B": mag_B,
-                    "V": V_col, "B_V": BV_col,
-                    "candidate_member": is_member,
-                })
-
-                zams = pipe.load_zams()
-                mu_used = dist_used = None
-                memb = df_cmd.candidate_member
-                if cal_dist > 0:
-                    mu_used = 5 * np.log10(cal_dist) - 5
-                    dist_used = cal_dist
-                elif memb.sum() >= 3:
-                    mu_used, dist_used = pipe.fit_distance_modulus(
-                        df_cmd.B_V[memb].values, df_cmd.V[memb].values, zams)
-
-                explain_entries.append(_EXPLAIN[7])
-                ref_info = (f"ref=#{ref_sel}  zp_V={zp_V:.3f}  zp_B={zp_B:.3f}  "
-                            f"A_V={A_V:.3f}")
-
-                fig_cmd = _build_cmd_fig(
-                    df_cmd, "B − V (dereddened)", "V (dereddened)",
-                    "CMD (calibrated)", zams, mu_used, dist_used,
-                    ref_info, True)
-
-                md_path = os.path.join(out_dir, "explanation.md")
-                _write_explanation(md_path, explain_entries, len(valid_stars),
-                                   True, zp_V, zp_B, cal_ebv, cal_rv,
-                                   A_V, A_B, mu_used, dist_used)
-
-                if mu_used is not None:
-                    st.success(f"보정 완료!  추정 거리 ≈ {dist_used:.0f} pc")
-                else:
-                    st.success("보정 완료 (거리 자동추정 불가 — 멤버 부족)")
+                _ri = next(i for i, s in enumerate(valid_stars)
+                           if s["id"] == ref_sel)
+                _zpV = float(cal_V - _mV[_ri])
+                _zpB = float(cal_B - _mB[_ri])
             else:
-                BV_col = mag_B - mag_V
-                df_cmd = pd.DataFrame({
-                    "id": ids,
-                    "x": positions[:, 0] * bfac,
-                    "y": positions[:, 1] * bfac,
-                    "instr_V": mag_V, "instr_B": mag_B,
-                    "V": mag_V, "B_V": BV_col,
-                    "candidate_member": is_member,
-                })
-                fig_cmd = _build_cmd_fig(
-                    df_cmd, "instrumental B − V", "instrumental V",
-                    "CMD (instrumental, uncalibrated)")
-                zams = None; mu_used = dist_used = None
-                md_path = os.path.join(out_dir, "explanation.md")
-                _write_explanation(md_path, explain_entries, len(valid_stars))
+                _zpV = _zpB = 0.0
 
-            csv_path = os.path.join(out_dir, "photometry.csv")
-            df_cmd.to_csv(csv_path, index=False)
-            png_path = os.path.join(out_dir, "cmd_plot.png")
-            fig_cmd.savefig(png_path, dpi=150)
-
-            st.session_state.cal = {
-                "df": df_cmd, "cmd_fig": fig_cmd,
-                "csv_path": csv_path, "png_path": png_path,
-                "md_path": md_path, "explain_entries": explain_entries,
+            st.session_state.cmd_base = {
+                "mag_V": _mV.tolist(), "mag_B": _mB.tolist(),
+                "zp_V": _zpV, "zp_B": _zpB,
+                "ids": _ids.tolist(),
+                "positions": _pos.tolist(),
+                "is_member": _mem.tolist(),
+                "calibrated": do_calibrate,
+                "bfac": int(bfac),
             }
+            if do_calibrate:
+                _zams = pipe.load_zams()
+                _Vt = _mV + _zpV
+                _BVt = (_mB + _zpB) - (_mV + _zpV)
+                _mu_a, _ = pipe.fit_distance_modulus(
+                    _BVt[_mem], _Vt[_mem], _zams)
+                st.session_state.fit_mu_sl = (
+                    round(float(_mu_a), 2) if _mu_a else 10.0)
+                st.session_state.fit_ebv_sl = 0.0
+                st.session_state.fit_to_sl = 0.0
+            st.rerun()
 
     # ══════════════════════════════════════════════════════════
-    # RESULTS
+    # INTERACTIVE ZAMS FITTING
     # ══════════════════════════════════════════════════════════
-    cal = st.session_state.cal
-    if cal is not None:
+    _cb = st.session_state.get("cmd_base")
+    if _cb is not None:
         st.divider()
-        tab_cmd, tab_img, tab_log, tab_data = st.tabs(
-            ["📊 CMD", "🖼️ 스택 이미지", "📜 설명", "📋 데이터"])
+        _mag_V = np.array(_cb["mag_V"])
+        _mag_B = np.array(_cb["mag_B"])
+        _zpV, _zpB = _cb["zp_V"], _cb["zp_B"]
+        _ids = np.array(_cb["ids"])
+        _pos = np.array(_cb["positions"])
+        _mem = np.array(_cb["is_member"])
+        _bfac = _cb["bfac"]
 
-        with tab_cmd:
-            st.pyplot(cal["cmd_fig"])
-            rc1, rc2, rc3 = st.columns(3)
-            with rc1:
-                with open(cal["png_path"], "rb") as f:
-                    st.download_button("💾 cmd_plot.png", f.read(),
-                                       "cmd_plot.png", "image/png")
-            with rc2:
-                with open(cal["csv_path"], "r", encoding="utf-8") as f:
-                    st.download_button("💾 photometry.csv", f.read(),
-                                       "photometry.csv", "text/csv")
-            with rc3:
-                with open(cal["md_path"], "r", encoding="utf-8") as f:
-                    st.download_button("💾 explanation.md", f.read(),
-                                       "explanation.md", "text/markdown")
+        if _cb["calibrated"]:
+            st.subheader("🎯 주계열 맞추기 (Interactive ZAMS Fitting)")
+            st.caption("슬라이더를 움직여 ZAMS를 데이터에 맞추고, "
+                       "턴오프에서 나이를 읽으세요")
 
-        with tab_img:
-            ic1, ic2 = st.columns(2)
-            with ic1:
-                fv = _show_fits(stack_V, "V-band stack")
-                st.pyplot(fv); plt.close(fv)
-            with ic2:
-                fb = _show_fits(stack_B, "B-band stack")
-                st.pyplot(fb); plt.close(fb)
+            col_sl, col_ch = st.columns([2, 5])
 
-        with tab_log:
-            for title, body in cal.get("explain_entries", []):
-                with st.expander(title, expanded=False):
-                    st.write(body)
-            st.subheader("스택 로그")
-            st.code(stacks.get("log_text", ""), language=None)
+            with col_sl:
+                st.markdown("**성간소광**")
+                fit_ebv = st.slider("E(B−V)", 0.0, 2.0, 0.0, 0.01,
+                                    key="fit_ebv_sl")
 
-        with tab_data:
-            st.dataframe(cal["df"], use_container_width=True, height=400)
+                st.markdown("**거리**")
+                fit_mu = st.slider("거리지수 μ", 0.0, 20.0, 10.0, 0.05,
+                                   key="fit_mu_sl")
+                _dpc = 10 ** (1 + fit_mu / 5.0)
+                st.metric("추정 거리", f"{_dpc:.0f} pc")
+
+                st.button("🔄 자동 맞춤", on_click=_auto_fit_cb,
+                          use_container_width=True)
+
+                st.divider()
+                st.markdown("**🔥 턴오프 → 나이 추정**")
+                st.caption("주계열에서 별이 꺾이는 색지수를 맞추세요")
+                fit_to = st.slider("턴오프 B−V", -0.35, 1.50, 0.0, 0.01,
+                                   key="fit_to_sl")
+                _age, _spt = _turnoff_age(fit_to)
+                st.metric("추정 나이", _format_age(_age))
+                st.caption(f"턴오프 분광형 ~{_spt}")
+
+            with col_ch:
+                _AV = 3.1 * fit_ebv
+                _Vc = (_mag_V + _zpV) - _AV
+                _BVc = ((_mag_B + _zpB) - (_mag_V + _zpV)) - fit_ebv
+
+                _zams = pipe.load_zams()
+
+                _df = pd.DataFrame({"id": _ids, "V": _Vc, "B_V": _BVc,
+                                    "candidate_member": _mem})
+
+                fig = go.Figure()
+                _fld = _df[~_df.candidate_member]
+                _mbr = _df[_df.candidate_member]
+
+                if len(_fld) > 0:
+                    fig.add_trace(go.Scatter(
+                        x=_fld.B_V, y=_fld.V, mode="markers",
+                        marker=dict(size=7, color="lightgray"),
+                        name=f"필드 ({len(_fld)})",
+                    ))
+                if len(_mbr) > 0:
+                    fig.add_trace(go.Scatter(
+                        x=_mbr.B_V, y=_mbr.V, mode="markers+text",
+                        marker=dict(size=9, color="steelblue"),
+                        text=[str(int(i)) for i in _mbr.id],
+                        textposition="top right",
+                        textfont=dict(size=8, color="dimgray"),
+                        name=f"멤버 후보 ({len(_mbr)})",
+                    ))
+
+                fig.add_trace(go.Scatter(
+                    x=_zams.B_V, y=_zams.M_V + fit_mu,
+                    mode="lines",
+                    line=dict(color="red", dash="dash", width=2),
+                    name=f"ZAMS (d≈{_dpc:.0f} pc)",
+                ))
+
+                _to_mv = float(np.interp(
+                    fit_to, _zams.B_V.values, _zams.M_V.values))
+                fig.add_vline(x=fit_to,
+                              line=dict(color="orange", width=1.5,
+                                        dash="dot"))
+                fig.add_trace(go.Scatter(
+                    x=[fit_to], y=[_to_mv + fit_mu],
+                    mode="markers",
+                    marker=dict(size=14, color="orange", symbol="star"),
+                    name=f"턴오프 ({_format_age(_age)})",
+                ))
+
+                fig.update_layout(
+                    xaxis_title="B − V (dereddened)",
+                    yaxis_title="V (dereddened)",
+                    yaxis=dict(autorange="reversed"),
+                    height=650,
+                    legend=dict(x=0.98, y=0.02, xanchor="right",
+                                yanchor="bottom"),
+                    margin=dict(l=50, r=20, t=30, b=50),
+                )
+                st.plotly_chart(fig, use_container_width=True,
+                                key="cmd_fit_chart")
+
+            # ── downloads ────────────────────────────────────
+            _df_save = pd.DataFrame({
+                "id": _ids,
+                "x": _pos[:, 0] * _bfac, "y": _pos[:, 1] * _bfac,
+                "instr_V": _mag_V, "instr_B": _mag_B,
+                "V": _Vc, "B_V": _BVc,
+                "candidate_member": _mem,
+            })
+            dc1, dc2 = st.columns(2)
+            with dc1:
+                st.download_button("💾 photometry.csv",
+                                   _df_save.to_csv(index=False),
+                                   "photometry.csv", "text/csv",
+                                   use_container_width=True)
+            with dc2:
+                _summary = (
+                    f"# ZAMS Fitting 결과\n\n"
+                    f"E(B-V) = {fit_ebv:.3f}\n"
+                    f"μ = {fit_mu:.2f}\n"
+                    f"거리 ≈ {_dpc:.0f} pc\n"
+                    f"턴오프 B-V = {fit_to:.2f}\n"
+                    f"추정 나이 ≈ {_format_age(_age)}\n"
+                    f"턴오프 분광형 ~{_spt}\n")
+                st.download_button("💾 결과 요약.txt", _summary,
+                                   "fitting_result.txt", "text/plain",
+                                   use_container_width=True)
+
+        else:
+            # ── uncalibrated instrumental CMD ────────────────
+            st.subheader("📊 CMD (기기등급)")
+            _BVc = _mag_B - _mag_V
+            _df = pd.DataFrame({"id": _ids, "V": _mag_V, "B_V": _BVc,
+                                "candidate_member": _mem})
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=_df.B_V, y=_df.V, mode="markers+text",
+                marker=dict(size=9, color="steelblue"),
+                text=[str(int(i)) for i in _df.id],
+                textposition="top right",
+                textfont=dict(size=8),
+            ))
+            fig.update_layout(
+                xaxis_title="instrumental B − V",
+                yaxis_title="instrumental V",
+                yaxis=dict(autorange="reversed"), height=600,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            st.download_button("💾 photometry.csv",
+                               _df.to_csv(index=False),
+                               "photometry.csv", "text/csv")
+
+    # ── stack images & explanations ──────────────────────────
+    st.divider()
+    tab_img, tab_exp = st.tabs(["🖼️ 스택 이미지", "📜 설명/로그"])
+    with tab_img:
+        ic1, ic2 = st.columns(2)
+        with ic1:
+            fv = _show_fits(stack_V, "V-band stack")
+            st.pyplot(fv); plt.close(fv)
+        with ic2:
+            fb = _show_fits(stack_B, "B-band stack")
+            st.pyplot(fb); plt.close(fb)
+    with tab_exp:
+        for _t, _b in [_EXPLAIN[1], _EXPLAIN[2], _EXPLAIN[34]]:
+            with st.expander(_t, expanded=False):
+                st.write(_b)
+        if _cb and _cb["calibrated"]:
+            with st.expander(_EXPLAIN[5][0], expanded=False):
+                st.write(_EXPLAIN[5][1])
+            with st.expander(_EXPLAIN[7][0], expanded=False):
+                st.write(_EXPLAIN[7][1])
+        st.subheader("스택 로그")
+        st.code(stacks.get("log_text", ""), language=None)
 
 elif stacks is None and not stack_clicked:
     st.markdown(
@@ -685,7 +799,7 @@ elif stacks is None and not stack_clicked:
         2. 스택 이미지에서 **별 좌표 확인** → X, Y 입력 → **별 측정**
         3. 구경/배경고리를 사이드바에서 조절하며 반복
         4. 별이 2개 이상이면 **CMD 생성** 가능
-        5. 기준별의 실제 등급을 알면 **보정 적용** → ZAMS 거리 추정
+        5. 기준별의 실제 등급을 입력 → **주계열 맞추기** (거리 + 나이 추정)
 
         데모 데이터가 없으면 **🧪 데모 데이터 생성** 버튼을 먼저 눌러주세요.
         """

@@ -21,12 +21,14 @@ import plotly.graph_objects as go
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 import cmd_pipeline as pipe
+import plate_solve as psolver
 
 st.set_page_config(page_title="CMD Pipeline", page_icon="⭐", layout="wide")
 
 # ── session state ─────────────────────────────────────────────────────────
 for _k, _v in [("stacks", None), ("stars", []),
-                ("cmd_base", None), ("next_id", 0)]:
+                ("cmd_base", None), ("next_id", 0),
+                ("plate_matches", None)]:
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
@@ -592,14 +594,92 @@ if stacks is not None:
             ref_star = next(s for s in valid_stars if s["id"] == ref_sel)
             st.caption(f"기기 V={ref_star['instr_V']:.3f}  "
                        f"B={ref_star['instr_B']:.3f}")
+
+            _pm = st.session_state.get("plate_matches")
+            _def_V, _def_B = 0.0, 0.0
+            if _pm:
+                _match_map = {m["star_id"]: m for m in _pm}
+                if ref_sel in _match_map:
+                    _def_V = _match_map[ref_sel]["cat_V"]
+                    _def_B = _match_map[ref_sel]["cat_B"]
+                    st.success(
+                        f"카탈로그 매칭: V={_def_V:.3f}  B={_def_B:.3f}")
+
             mc1, mc2 = st.columns(2)
             with mc1:
-                cal_V = st.number_input("실제 V", value=0.0, format="%.3f",
+                cal_V = st.number_input("실제 V", value=_def_V, format="%.3f",
                                         key="cal_V")
             with mc2:
-                cal_B = st.number_input("실제 B", value=0.0, format="%.3f",
+                cal_B = st.number_input("실제 B", value=_def_B, format="%.3f",
                                         key="cal_B")
             do_calibrate = cal_V != 0.0 or cal_B != 0.0
+
+            # ── plate solving ──
+            with st.expander("🔭 플레이트 솔빙 (자동 표준성 검색)", expanded=False):
+                st.caption("Astrometry.net + APASS 카탈로그로 "
+                           "측정된 별의 실제 등급을 자동으로 찾습니다")
+                _ps_key = st.text_input("API Key", value=psolver.API_KEY,
+                                        key="ps_api_key")
+                _ps_clicked = st.button("🔭 플레이트 솔빙 시작",
+                                        use_container_width=True)
+                if _ps_clicked:
+                    _vfits = os.path.join(out_dir, "stack_V.fits")
+                    if not os.path.isfile(_vfits):
+                        st.error("stack_V.fits가 없습니다. 먼저 스택을 실행하세요.")
+                    elif len(valid_stars) == 0:
+                        st.error("측정된 별이 없습니다.")
+                    else:
+                        _xy = [[s["x"], s["y"]] for s in valid_stars]
+                        _status_box = st.empty()
+                        _pbar = st.progress(0, text="플레이트 솔빙 시작...")
+                        _steps = {"n": 0}
+
+                        def _ps_status(msg):
+                            _steps["n"] = min(_steps["n"] + 15, 90)
+                            _pbar.progress(_steps["n"], text=msg)
+                            _status_box.caption(msg)
+
+                        try:
+                            wcs, matches = psolver.auto_identify(
+                                _vfits, _xy,
+                                api_key=_ps_key,
+                                on_status=_ps_status)
+                            _pbar.progress(100, text="완료!")
+                            if matches:
+                                _result = []
+                                for m in matches:
+                                    si = m["star_idx"]
+                                    _result.append({
+                                        "star_id": valid_stars[si]["id"],
+                                        "star_x": valid_stars[si]["x"],
+                                        "star_y": valid_stars[si]["y"],
+                                        "cat_V": m["cat_V"],
+                                        "cat_B": m["cat_B"],
+                                        "sep_arcsec": m["sep_arcsec"],
+                                    })
+                                st.session_state.plate_matches = _result
+                                st.success(
+                                    f"{len(_result)}개 별 카탈로그 매칭 성공!")
+                                st.rerun()
+                            else:
+                                st.warning("매칭된 별이 없습니다. "
+                                           "별이 너무 어둡거나 시야각이 좁을 수 있습니다.")
+                        except Exception as e:
+                            _pbar.progress(100, text="실패")
+                            st.error(f"플레이트 솔빙 오류: {e}")
+
+                if _pm:
+                    st.markdown("**매칭 결과**")
+                    import pandas as _pd_ps
+                    _mdf = _pd_ps.DataFrame(_pm)
+                    _mdf = _mdf.rename(columns={
+                        "star_id": "#", "cat_V": "V(cat)",
+                        "cat_B": "B(cat)", "sep_arcsec": "거리(\")"})
+                    st.dataframe(
+                        _mdf[["#", "V(cat)", "B(cat)", "거리(\")"]],
+                        use_container_width=True, hide_index=True)
+                    st.caption("기준별을 선택하면 실제 등급이 자동 입력됩니다")
+
         with col_gen:
             gen_clicked = st.button("📊 CMD 생성", type="primary",
                                     use_container_width=True)

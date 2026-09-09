@@ -28,7 +28,7 @@ st.set_page_config(page_title="CMD Pipeline", page_icon="⭐", layout="wide")
 # ── session state ─────────────────────────────────────────────────────────
 for _k, _v in [("stacks", None), ("stars", []),
                 ("cmd_base", None), ("next_id", 0),
-                ("plate_matches", None), ("click_xy", None)]:
+                ("plate_matches", None)]:
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
@@ -538,15 +538,6 @@ if stacks is not None:
                     x1=s["x"]+r_out, y1=s["y"]+r_out,
                     line=dict(color="gold", width=1, dash="dot"))
 
-        _cxy = st.session_state.get("click_xy")
-        if _cxy:
-            fig_map.add_trace(go.Scatter(
-                x=[_cxy[0]], y=[_cxy[1]], mode="markers",
-                marker=dict(size=18, color="red", symbol="x-thin",
-                            line=dict(width=3, color="red")),
-                showlegend=False, hoverinfo="skip",
-            ))
-
         fig_map.update_layout(
             width=560, height=560,
             xaxis=dict(title="X (px)", constrain="domain", range=[-5, w+5]),
@@ -555,65 +546,56 @@ if stacks is not None:
             showlegend=False,
             margin=dict(l=50, r=10, t=10, b=50),
             dragmode="zoom",
-            clickmode="event+select",
         )
-        _event = st.plotly_chart(fig_map, on_select="rerun",
-                                 selection_mode="points", key="star_map")
-        if _event and _event.selection and _event.selection.points:
-            for _pt in _event.selection.points:
-                if _pt.get("curve_number", -1) == 0:
-                    st.session_state.click_xy = (
-                        float(_pt["x"]), float(_pt["y"]))
-                    break
-        st.caption(f"👆 **별을 클릭하세요**  |  🟢 측정됨  🔴 선택  "
-                   f"|  {w}×{h} px (bin={bfac})")
+        st.plotly_chart(fig_map, key="star_map")
+        st.caption(f"🟢 측정된 별  |  이미지: {w}×{h} px (bin={bfac})  "
+                   f"|  마우스 hover로 좌표 확인")
 
     # ── measurement controls ──────────────────────────────────
     with col_ctrl:
-        _cxy = st.session_state.get("click_xy")
-        if _cxy:
-            inp_x, inp_y = _cxy
-            inp_x = max(0, min(int(round(inp_x)), w - 1))
-            inp_y = max(0, min(int(round(inp_y)), h - 1))
-            st.markdown(f"**선택 위치: ({inp_x}, {inp_y})**")
-
-            fig_cut = _cutout_fig(stack_V, inp_x, inp_y, r_ap, r_in, r_out)
-            st.pyplot(fig_cut)
-            plt.close(fig_cut)
-            st.caption("🟢 구경  🟡 배경고리  🔴 선택 위치")
-
-            if st.button("⭐ 별 측정", type="primary",
-                         use_container_width=True):
-                cx, cy = _find_centroid(stack_V, inp_x, inp_y, centroid_box)
-                mV, fV, snr_V = _measure_star(stack_V, cx, cy,
-                                               r_ap, r_in, r_out)
-                mB, fB, snr_B = _measure_star(stack_B, cx, cy,
-                                               r_ap, r_in, r_out)
-                sid = st.session_state.next_id
-                st.session_state.next_id += 1
-                st.session_state.stars.append({
-                    "id": sid,
-                    "x": round(cx, 2), "y": round(cy, 2),
-                    "instr_V": round(mV, 4) if np.isfinite(mV) else np.nan,
-                    "instr_B": round(mB, 4) if np.isfinite(mB) else np.nan,
-                    "snr_V": round(snr_V, 1),
-                })
-                if np.isfinite(mV):
-                    st.success(
-                        f"별 #{sid} 측정 완료!  "
-                        f"V={mV:.3f}  B={mB:.3f}  B-V={mB-mV:.3f}  "
-                        f"SNR={snr_V:.0f}")
-                    if abs(cx - inp_x) > 0.5 or abs(cy - inp_y) > 0.5:
-                        st.caption(
-                            f"중심 보정: ({inp_x}, {inp_y}) → "
-                            f"({cx:.1f}, {cy:.1f})")
-                else:
-                    st.warning(
-                        f"별 #{sid}: 유효한 플럭스 없음 (구경/위치 확인)")
-                st.session_state.click_xy = None
-                st.rerun()
+        _is_first = len(stars) == 0
+        if _is_first:
+            st.markdown("**1단계: 표준성 측정**")
+            st.caption("실제 등급을 아는 별을 먼저 측정하세요. "
+                       "hover로 좌표 확인 → 입력 → 별 측정")
         else:
-            st.info("👆 왼쪽 이미지에서 별을 클릭하세요")
+            st.markdown("**별 위치 입력**")
+            st.caption("hover로 좌표 확인 → 입력")
+        mc1, mc2 = st.columns(2)
+        with mc1:
+            inp_x = st.number_input("X", value=w // 2, min_value=0,
+                                    max_value=w - 1, key="inp_x")
+        with mc2:
+            inp_y = st.number_input("Y", value=h // 2, min_value=0,
+                                    max_value=h - 1, key="inp_y")
+
+        fig_cut = _cutout_fig(stack_V, inp_x, inp_y, r_ap, r_in, r_out)
+        st.pyplot(fig_cut)
+        plt.close(fig_cut)
+        st.caption("🟢 구경  🟡 배경고리  🔴 입력 위치")
+
+        if st.button("⭐ 별 측정", type="primary", use_container_width=True):
+            cx, cy = _find_centroid(stack_V, inp_x, inp_y, centroid_box)
+            mV, fV, snr_V = _measure_star(stack_V, cx, cy, r_ap, r_in, r_out)
+            mB, fB, snr_B = _measure_star(stack_B, cx, cy, r_ap, r_in, r_out)
+            sid = st.session_state.next_id
+            st.session_state.next_id += 1
+            st.session_state.stars.append({
+                "id": sid,
+                "x": round(cx, 2), "y": round(cy, 2),
+                "instr_V": round(mV, 4) if np.isfinite(mV) else np.nan,
+                "instr_B": round(mB, 4) if np.isfinite(mB) else np.nan,
+                "snr_V": round(snr_V, 1),
+            })
+            if np.isfinite(mV):
+                st.success(f"별 #{sid} 측정 완료!  "
+                           f"V={mV:.3f}  B={mB:.3f}  B-V={mB-mV:.3f}  "
+                           f"SNR={snr_V:.0f}")
+                if abs(cx - inp_x) > 0.5 or abs(cy - inp_y) > 0.5:
+                    st.caption(f"중심 보정: ({inp_x}, {inp_y}) → ({cx:.1f}, {cy:.1f})")
+            else:
+                st.warning(f"별 #{sid}: 유효한 플럭스 없음 (구경/위치 확인)")
+            st.rerun()
 
         # ── star list ──────────────────────────────────────────
         st.divider()
@@ -644,8 +626,39 @@ if stacks is not None:
                 st.session_state.next_id = 0
                 st.session_state.cmd_base = None
                 st.rerun()
+
+            # ── 표준성 (첫 번째 별) 보정 ────────────────────────
+            _std = stars[0]
+            if np.isfinite(_std["instr_V"]) and np.isfinite(_std["instr_B"]):
+                st.divider()
+                st.markdown(f"**⭐ 표준성: 별 #{_std['id']}**")
+                st.caption(f"기기등급  V={_std['instr_V']:.3f}  "
+                           f"B={_std['instr_B']:.3f}")
+
+                _pm = st.session_state.get("plate_matches")
+                _def_sV, _def_sB = 0.0, 0.0
+                if _pm:
+                    _match_map = {m["star_id"]: m for m in _pm}
+                    if _std["id"] in _match_map:
+                        _def_sV = _match_map[_std["id"]]["cat_V"]
+                        _def_sB = _match_map[_std["id"]]["cat_B"]
+                        st.success(
+                            f"카탈로그 매칭: V={_def_sV:.3f}  "
+                            f"B={_def_sB:.3f}")
+
+                sc1, sc2 = st.columns(2)
+                with sc1:
+                    std_V = st.number_input("실제 V", value=_def_sV,
+                                            format="%.3f", key="std_V")
+                with sc2:
+                    std_B = st.number_input("실제 B", value=_def_sB,
+                                            format="%.3f", key="std_B")
+                if std_V != 0.0 or std_B != 0.0:
+                    _zpV = std_V - _std["instr_V"]
+                    _zpB = std_B - _std["instr_B"]
+                    st.caption(f"ZP: V={_zpV:+.3f}  B={_zpB:+.3f}")
         else:
-            st.info("아직 측정된 별이 없습니다. 위에서 좌표를 입력하고 '별 측정'을 눌러주세요.")
+            st.info("이미지에서 좌표를 확인하고 표준성부터 측정하세요.")
 
     # ══════════════════════════════════════════════════════════
     # CMD GENERATION
@@ -657,37 +670,20 @@ if stacks is not None:
         st.divider()
         st.subheader("📊 CMD 생성 & 주계열 맞추기")
 
-        col_ref, col_gen = st.columns([3, 5])
-        with col_ref:
-            st.markdown("**기준별 보정 (선택사항)**")
-            st.caption("실제 등급을 모르면 빈칸 → 기기등급 CMD만 생성")
-            ref_ids = [s["id"] for s in valid_stars]
-            ref_sel = st.selectbox("기준별 #", ref_ids, index=0,
-                                   key="ref_star_sel")
-            ref_star = next(s for s in valid_stars if s["id"] == ref_sel)
-            st.caption(f"기기 V={ref_star['instr_V']:.3f}  "
-                       f"B={ref_star['instr_B']:.3f}")
+        cal_V = st.session_state.get("std_V", 0.0)
+        cal_B = st.session_state.get("std_B", 0.0)
+        do_calibrate = cal_V != 0.0 or cal_B != 0.0
 
-            _pm = st.session_state.get("plate_matches")
-            _def_V, _def_B = 0.0, 0.0
-            if _pm:
-                _match_map = {m["star_id"]: m for m in _pm}
-                if ref_sel in _match_map:
-                    _def_V = _match_map[ref_sel]["cat_V"]
-                    _def_B = _match_map[ref_sel]["cat_B"]
-                    st.success(
-                        f"카탈로그 매칭: V={_def_V:.3f}  B={_def_B:.3f}")
+        if do_calibrate:
+            _std0 = stars[0]
+            st.caption(f"표준성: 별 #{_std0['id']}  |  "
+                       f"실제 V={cal_V:.3f}  B={cal_B:.3f}")
+        else:
+            st.caption("표준성 등급 미입력 → 기기등급 CMD만 생성됩니다. "
+                       "오른쪽 패널에서 표준성 실제 등급을 입력하세요.")
 
-            mc1, mc2 = st.columns(2)
-            with mc1:
-                cal_V = st.number_input("실제 V", value=_def_V, format="%.3f",
-                                        key="cal_V")
-            with mc2:
-                cal_B = st.number_input("실제 B", value=_def_B, format="%.3f",
-                                        key="cal_B")
-            do_calibrate = cal_V != 0.0 or cal_B != 0.0
-
-            # ── plate solving ──
+        col_ps, col_gen = st.columns([3, 5])
+        with col_ps:
             with st.expander("🔭 플레이트 솔빙 (자동 표준성 검색)", expanded=False):
                 st.caption("Astrometry.net + APASS 카탈로그로 "
                            "측정된 별의 실제 등급을 자동으로 찾습니다")
@@ -698,7 +694,8 @@ if stacks is not None:
                 if _ps_clicked:
                     _vfits = os.path.join(out_dir, "stack_V.fits")
                     if not os.path.isfile(_vfits):
-                        st.error("stack_V.fits가 없습니다. 먼저 스택을 실행하세요.")
+                        st.error("stack_V.fits가 없습니다. "
+                                 "먼저 스택을 실행하세요.")
                     elif len(valid_stars) == 0:
                         st.error("측정된 별이 없습니다.")
                     else:
@@ -735,23 +732,21 @@ if stacks is not None:
                                     f"{len(_result)}개 별 카탈로그 매칭 성공!")
                                 st.rerun()
                             else:
-                                st.warning("매칭된 별이 없습니다. "
-                                           "별이 너무 어둡거나 시야각이 좁을 수 있습니다.")
+                                st.warning("매칭된 별이 없습니다.")
                         except Exception as e:
                             _pbar.progress(100, text="실패")
                             st.error(f"플레이트 솔빙 오류: {e}")
 
+                _pm = st.session_state.get("plate_matches")
                 if _pm:
                     st.markdown("**매칭 결과**")
-                    import pandas as _pd_ps
-                    _mdf = _pd_ps.DataFrame(_pm)
+                    _mdf = pd.DataFrame(_pm)
                     _mdf = _mdf.rename(columns={
                         "star_id": "#", "cat_V": "V(cat)",
                         "cat_B": "B(cat)", "sep_arcsec": "거리(\")"})
                     st.dataframe(
                         _mdf[["#", "V(cat)", "B(cat)", "거리(\")"]],
                         use_container_width=True, hide_index=True)
-                    st.caption("기준별을 선택하면 실제 등급이 자동 입력됩니다")
 
         with col_gen:
             gen_clicked = st.button("📊 CMD 생성", type="primary",
@@ -768,10 +763,8 @@ if stacks is not None:
             _mem = _rd <= (member_frac * min(h, w))
 
             if do_calibrate:
-                _ri = next(i for i, s in enumerate(valid_stars)
-                           if s["id"] == ref_sel)
-                _zpV = float(cal_V - _mV[_ri])
-                _zpB = float(cal_B - _mB[_ri])
+                _zpV = float(cal_V - stars[0]["instr_V"])
+                _zpB = float(cal_B - stars[0]["instr_B"])
             else:
                 _zpV = _zpB = 0.0
 

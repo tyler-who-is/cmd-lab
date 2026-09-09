@@ -17,7 +17,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
-from streamlit_plotly_events import plotly_events
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
@@ -539,6 +538,21 @@ if stacks is not None:
                     x1=s["x"]+r_out, y1=s["y"]+r_out,
                     line=dict(color="gold", width=1, dash="dot"))
 
+        # invisible click-target grid overlay
+        _cstep = max(5, int(np.ceil(np.sqrt(h * w / 5000))))
+        _cgx, _cgy = np.meshgrid(
+            np.arange(0, w, _cstep, dtype=float),
+            np.arange(0, h, _cstep, dtype=float),
+        )
+        fig_map.add_trace(go.Scatter(
+            x=_cgx.ravel().tolist(),
+            y=_cgy.ravel().tolist(),
+            mode="markers",
+            marker=dict(size=max(_cstep, 8), opacity=0.01,
+                        color="white"),
+            showlegend=False, hoverinfo="x+y",
+        ))
+
         _cxy = st.session_state.get("click_xy")
         if _cxy:
             fig_map.add_trace(go.Scatter(
@@ -555,20 +569,34 @@ if stacks is not None:
                        range=[-5, h+5]),
             showlegend=False,
             margin=dict(l=50, r=10, t=10, b=50),
-            dragmode="zoom",
+            dragmode="select",
+            clickmode="event+select",
         )
-        _clicked = plotly_events(fig_map, click_event=True,
-                                 select_event=False, hover_event=False,
-                                 override_height=560, key="star_map")
-        if _clicked:
-            _pt = _clicked[0]
-            _nx = max(0, min(int(round(float(_pt["x"]))), w - 1))
-            _ny = max(0, min(int(round(float(_pt["y"]))), h - 1))
-            st.session_state.click_xy = (_nx, _ny)
-            st.session_state.inp_x = _nx
-            st.session_state.inp_y = _ny
+        _event = st.plotly_chart(fig_map, on_select="rerun",
+                                 selection_mode=("points", "box"),
+                                 key="star_map")
+        if _event and _event.selection:
+            _pts = _event.selection.get("points", [])
+            _box = _event.selection.get("box", [])
+            _nx = _ny = None
+            if _pts:
+                _nx = int(round(float(_pts[0]["x"])))
+                _ny = int(round(float(_pts[0]["y"])))
+            elif _box:
+                _bx = _box[0].get("x", [0, 0])
+                _by = _box[0].get("y", [0, 0])
+                _nx = int(round((_bx[0] + _bx[1]) / 2))
+                _ny = int(round((_by[0] + _by[1]) / 2))
+            if _nx is not None:
+                _nx = max(0, min(_nx, w - 1))
+                _ny = max(0, min(_ny, h - 1))
+                _old = st.session_state.get("click_xy")
+                if (_nx, _ny) != _old:
+                    st.session_state.click_xy = (_nx, _ny)
+                    st.session_state.inp_x = _nx
+                    st.session_state.inp_y = _ny
 
-        st.caption(f"👆 **이미지 클릭으로 별 선택**  |  🟢 측정됨  🔴 선택  "
+        st.caption(f"👆 **클릭/드래그로 별 선택**  |  🟢 측정됨  🔴 선택  "
                    f"|  {w}×{h} px (bin={bfac})")
 
     # ── measurement controls ──────────────────────────────────

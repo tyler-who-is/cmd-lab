@@ -5,6 +5,5 @@ pandas
 matplotlib
 streamlit
 plotly
-streamlit-plotly-events
 requests
 astroquery

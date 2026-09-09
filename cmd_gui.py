@@ -431,36 +431,43 @@ if stack_clicked:
             st.session_state.cmd_base = None
             st.session_state.next_id = 0
 
-            # ── auto plate solve + catalog ──
-            progress.progress(75, text="플레이트 솔빙 중 (3~5분 소요)...")
+            # ── read WCS from FITS header + APASS catalog ──
+            progress.progress(75, text="FITS 헤더에서 WCS 읽는 중...")
             try:
+                from astropy.wcs import WCS as _WCS
                 _vfits = os.path.join(out_dir, "stack_V.fits")
-                _wcs = psolver.solve_image(
-                    _vfits,
-                    on_status=lambda m: progress.progress(
-                        80, text=f"솔빙: {m}"))
-                st.session_state.plate_wcs = _wcs
-                progress.progress(90, text="APASS 카탈로그 조회 중...")
-                _cy_px, _cx_px = stack_V.shape[0] / 2, stack_V.shape[1] / 2
-                _ra_c, _dec_c = _wcs.all_pix2world(_cx_px, _cy_px, 0)
-                _corner_ra, _corner_dec = _wcs.all_pix2world(0, 0, 0)
-                _rad = max(abs(float(_ra_c - _corner_ra)),
-                           abs(float(_dec_c - _corner_dec))) + 0.1
-                _rad = max(0.2, min(_rad, 2.0))
-                _cat = psolver.query_apass(
-                    float(_ra_c), float(_dec_c), _rad)
-                st.session_state.plate_catalog = _cat
-                if _cat is not None:
-                    progress.progress(100,
-                        text=f"완료! 카탈로그 {len(_cat)}개 별 로드")
+                from astropy.io import fits as _afits
+                with _afits.open(_vfits) as _hdul:
+                    _wcs = _WCS(_hdul[0].header)
+                if _wcs.has_celestial:
+                    st.session_state.plate_wcs = _wcs
+                    progress.progress(85, text="APASS 카탈로그 조회 중...")
+                    _cy_px = stack_V.shape[0] / 2
+                    _cx_px = stack_V.shape[1] / 2
+                    _ra_c, _dec_c = _wcs.all_pix2world(_cx_px, _cy_px, 0)
+                    _corner_ra, _corner_dec = _wcs.all_pix2world(0, 0, 0)
+                    _rad = max(abs(float(_ra_c - _corner_ra)),
+                               abs(float(_dec_c - _corner_dec))) + 0.1
+                    _rad = max(0.2, min(_rad, 2.0))
+                    _cat = psolver.query_apass(
+                        float(_ra_c), float(_dec_c), _rad)
+                    st.session_state.plate_catalog = _cat
+                    if _cat is not None:
+                        progress.progress(100,
+                            text=f"완료! 카탈로그 {len(_cat)}개 별 로드")
+                    else:
+                        progress.progress(100,
+                            text="WCS 확인, 카탈로그 별 없음")
                 else:
-                    progress.progress(100,
-                        text="솔빙 완료, 카탈로그 별 없음")
+                    st.session_state.plate_wcs = None
+                    st.session_state.plate_catalog = None
+                    progress.progress(100, text="스택 완료 (WCS 헤더 없음)")
+                    st.warning("FITS 헤더에 WCS 정보가 없습니다.")
             except Exception as _pe:
                 st.session_state.plate_wcs = None
                 st.session_state.plate_catalog = None
-                progress.progress(100, text="스택 완료 (솔빙 실패)")
-                st.warning(f"플레이트 솔빙 실패 — 수동 입력 필요: {_pe}")
+                progress.progress(100, text="스택 완료 (WCS 읽기 실패)")
+                st.warning(f"WCS 읽기 실패: {_pe}")
         except Exception as e:
             st.error(f"스택 오류: {e}")
             import traceback
@@ -570,21 +577,6 @@ if stacks is not None:
                     x1=s["x"]+r_out, y1=s["y"]+r_out,
                     line=dict(color="gold", width=1, dash="dot"))
 
-        # invisible click-target grid overlay
-        _cstep = max(5, int(np.ceil(np.sqrt(h * w / 5000))))
-        _cgx, _cgy = np.meshgrid(
-            np.arange(0, w, _cstep, dtype=float),
-            np.arange(0, h, _cstep, dtype=float),
-        )
-        fig_map.add_trace(go.Scatter(
-            x=_cgx.ravel().tolist(),
-            y=_cgy.ravel().tolist(),
-            mode="markers",
-            marker=dict(size=max(_cstep, 8), opacity=0.01,
-                        color="white"),
-            showlegend=False, hoverinfo="x+y",
-        ))
-
         _cxy = st.session_state.get("click_xy")
         if _cxy:
             fig_map.add_trace(go.Scatter(
@@ -602,23 +594,24 @@ if stacks is not None:
             showlegend=False,
             margin=dict(l=50, r=10, t=10, b=50),
             dragmode="select",
-            clickmode="event+select",
         )
         _event = st.plotly_chart(fig_map, on_select="rerun",
-                                 selection_mode=("points", "box"),
+                                 selection_mode="box",
                                  key="star_map")
         if _event and _event.selection:
-            _pts = _event.selection.get("points", [])
             _box = _event.selection.get("box", [])
+            _pts = _event.selection.get("points", [])
             _nx = _ny = None
-            if _pts:
-                _nx = int(round(float(_pts[0]["x"])))
-                _ny = int(round(float(_pts[0]["y"])))
-            elif _box:
+            if _box:
                 _bx = _box[0].get("x", [0, 0])
                 _by = _box[0].get("y", [0, 0])
                 _nx = int(round((_bx[0] + _bx[1]) / 2))
                 _ny = int(round((_by[0] + _by[1]) / 2))
+            elif _pts:
+                _xs = [p["x"] for p in _pts]
+                _ys = [p["y"] for p in _pts]
+                _nx = int(round(sum(_xs) / len(_xs)))
+                _ny = int(round(sum(_ys) / len(_ys)))
             if _nx is not None:
                 _nx = max(0, min(_nx, w - 1))
                 _ny = max(0, min(_ny, h - 1))
@@ -628,7 +621,8 @@ if stacks is not None:
                     st.session_state.inp_x = _nx
                     st.session_state.inp_y = _ny
 
-        st.caption(f"👆 **클릭/드래그로 별 선택**  |  🟢 측정됨  🔴 선택  "
+        st.caption(f"👆 **별 주위를 드래그**하면 중심 자동 보정  "
+                   f"|  🟢 측정됨  🔴 선택  "
                    f"|  {w}×{h} px (bin={bfac})")
 
     # ── measurement controls ──────────────────────────────────
@@ -636,10 +630,10 @@ if stacks is not None:
         _is_first = len(stars) == 0
         if _is_first:
             st.markdown("**1단계: 표준성 측정**")
-            st.caption("실제 등급을 아는 별을 이미지에서 클릭하세요")
+            st.caption("실제 등급을 아는 별 주위를 드래그하세요")
         else:
             st.markdown("**별 선택**")
-            st.caption("이미지 클릭 또는 좌표 직접 입력")
+            st.caption("이미지에서 별 주위를 드래그 또는 좌표 직접 입력")
         mc1, mc2 = st.columns(2)
         with mc1:
             inp_x = st.number_input("X", value=w // 2, min_value=0,
@@ -801,75 +795,14 @@ if stacks is not None:
             st.caption("표준성 등급 미입력 → 기기등급 CMD만 생성됩니다. "
                        "오른쪽 패널에서 표준성 실제 등급을 입력하세요.")
 
-        col_ps, col_gen = st.columns([3, 5])
-        with col_ps:
-            with st.expander("🔭 플레이트 솔빙 (자동 표준성 검색)", expanded=False):
-                st.caption("Astrometry.net + APASS 카탈로그로 "
-                           "측정된 별의 실제 등급을 자동으로 찾습니다")
-                _ps_key = st.text_input("API Key", value=psolver.API_KEY,
-                                        key="ps_api_key")
-                _ps_clicked = st.button("🔭 플레이트 솔빙 시작",
-                                        use_container_width=True)
-                if _ps_clicked:
-                    _vfits = os.path.join(out_dir, "stack_V.fits")
-                    if not os.path.isfile(_vfits):
-                        st.error("stack_V.fits가 없습니다. "
-                                 "먼저 스택을 실행하세요.")
-                    elif len(valid_stars) == 0:
-                        st.error("측정된 별이 없습니다.")
-                    else:
-                        _xy = [[s["x"], s["y"]] for s in valid_stars]
-                        _status_box = st.empty()
-                        _pbar = st.progress(0, text="플레이트 솔빙 시작...")
-                        _steps = {"n": 0}
+        _wcs_ok = st.session_state.get("plate_wcs") is not None
+        if _wcs_ok:
+            st.caption("WCS 정보 로드 완료 — 별 측정 시 카탈로그 자동 매칭됩니다.")
+        else:
+            st.caption("FITS 헤더에 WCS 없음 — 표준성 등급을 수동 입력하세요.")
 
-                        def _ps_status(msg):
-                            _steps["n"] = min(_steps["n"] + 15, 90)
-                            _pbar.progress(_steps["n"], text=msg)
-                            _status_box.caption(msg)
-
-                        try:
-                            wcs, matches = psolver.auto_identify(
-                                _vfits, _xy,
-                                api_key=_ps_key,
-                                on_status=_ps_status)
-                            _pbar.progress(100, text="완료!")
-                            if matches:
-                                _result = []
-                                for m in matches:
-                                    si = m["star_idx"]
-                                    _result.append({
-                                        "star_id": valid_stars[si]["id"],
-                                        "star_x": valid_stars[si]["x"],
-                                        "star_y": valid_stars[si]["y"],
-                                        "cat_V": m["cat_V"],
-                                        "cat_B": m["cat_B"],
-                                        "sep_arcsec": m["sep_arcsec"],
-                                    })
-                                st.session_state.plate_matches = _result
-                                st.success(
-                                    f"{len(_result)}개 별 카탈로그 매칭 성공!")
-                                st.rerun()
-                            else:
-                                st.warning("매칭된 별이 없습니다.")
-                        except Exception as e:
-                            _pbar.progress(100, text="실패")
-                            st.error(f"플레이트 솔빙 오류: {e}")
-
-                _pm = st.session_state.get("plate_matches")
-                if _pm:
-                    st.markdown("**매칭 결과**")
-                    _mdf = pd.DataFrame(_pm)
-                    _mdf = _mdf.rename(columns={
-                        "star_id": "#", "cat_V": "V(cat)",
-                        "cat_B": "B(cat)", "sep_arcsec": "거리(\")"})
-                    st.dataframe(
-                        _mdf[["#", "V(cat)", "B(cat)", "거리(\")"]],
-                        use_container_width=True, hide_index=True)
-
-        with col_gen:
-            gen_clicked = st.button("📊 CMD 생성", type="primary",
-                                    use_container_width=True)
+        gen_clicked = st.button("📊 CMD 생성", type="primary",
+                                use_container_width=True)
 
         if gen_clicked:
             os.makedirs(out_dir, exist_ok=True)

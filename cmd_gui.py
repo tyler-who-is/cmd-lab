@@ -298,24 +298,93 @@ st.header("CMD 파이프라인 — 수동 구경측광 모드")
 # ═══════════════════════════════════════════════════════════════════════════
 # STACKING
 # ═══════════════════════════════════════════════════════════════════════════
+def _load_wcs_and_catalog(stack_V, vfits_path, progress, pct_start=75):
+    """Read WCS from FITS header, query APASS catalog."""
+    from astropy.wcs import WCS as _WCS
+    from astropy.io import fits as _afits
+    progress.progress(pct_start, text="FITS 헤더에서 WCS 읽는 중...")
+    try:
+        with _afits.open(vfits_path) as _hdul:
+            _wcs = _WCS(_hdul[0].header)
+        if _wcs.has_celestial:
+            st.session_state.plate_wcs = _wcs
+            progress.progress(pct_start + 10, text="APASS 카탈로그 조회 중...")
+            _cy_px = stack_V.shape[0] / 2
+            _cx_px = stack_V.shape[1] / 2
+            _ra_c, _dec_c = _wcs.all_pix2world(_cx_px, _cy_px, 0)
+            _corner_ra, _corner_dec = _wcs.all_pix2world(0, 0, 0)
+            _rad = max(abs(float(_ra_c - _corner_ra)),
+                       abs(float(_dec_c - _corner_dec))) + 0.1
+            _rad = max(0.2, min(_rad, 2.0))
+            _cat = psolver.query_apass(float(_ra_c), float(_dec_c), _rad)
+            st.session_state.plate_catalog = _cat
+            if _cat is not None:
+                progress.progress(100, text=f"완료! 카탈로그 {len(_cat)}개 별 로드")
+            else:
+                progress.progress(100, text="WCS 확인, 카탈로그 별 없음")
+        else:
+            st.session_state.plate_wcs = None
+            st.session_state.plate_catalog = None
+            progress.progress(100, text="완료 (WCS 헤더 없음)")
+            st.warning("FITS 헤더에 WCS 정보가 없습니다.")
+    except Exception as _pe:
+        st.session_state.plate_wcs = None
+        st.session_state.plate_catalog = None
+        progress.progress(100, text="완료 (WCS 읽기 실패)")
+        st.warning(f"WCS 읽기 실패: {_pe}")
+
+
 if stack_clicked:
-    ok = False
-    data_dir = None
-    v_lights = b_lights = ""
     if _zip_upload is None:
         st.error("ZIP 파일을 먼저 업로드하세요.")
     else:
         import zipfile
-        _valid_ext = {".fit", ".fits", ".fts"}
-        _filters = {"v", "b"}
-        _subs = {"lights", "darks", "flats", "bias", "light", "dark", "flat"}
-        _sub_map = {"light": "lights", "dark": "darks", "flat": "flats"}
+        _zf = zipfile.ZipFile(io.BytesIO(_zip_upload.getvalue()))
+        _names = [n.replace("\\", "/") for n in _zf.namelist()]
+        _has_stack = any(n.endswith("stack_V.fits") for n in _names) and \
+                     any(n.endswith("stack_B.fits") for n in _names)
 
-        _tmpdir = _tmpmod.mkdtemp(prefix="cmd_")
-        data_dir = _tmpdir
-        _total = 0
-        with zipfile.ZipFile(io.BytesIO(_zip_upload.getvalue())) as zf:
-            for info in zf.infolist():
+        if _has_stack:
+            # ── pre-stacked FITS: load directly ──
+            from astropy.io import fits as afits
+            progress = st.progress(0, text="스택 파일 로드 중...")
+            _tmpdir = _tmpmod.mkdtemp(prefix="cmd_")
+            os.makedirs(out_dir, exist_ok=True)
+            for n in _names:
+                bn = os.path.basename(n)
+                if bn in ("stack_V.fits", "stack_B.fits"):
+                    _out = os.path.join(out_dir, bn)
+                    with open(_out, "wb") as f:
+                        f.write(_zf.read(n))
+            _zf.close()
+            progress.progress(30, text="FITS 읽는 중...")
+            with afits.open(os.path.join(out_dir, "stack_V.fits")) as _h:
+                stack_V = _h[0].data.astype(np.float64)
+            with afits.open(os.path.join(out_dir, "stack_B.fits")) as _h:
+                stack_B = _h[0].data.astype(np.float64)
+            progress.progress(50, text="로드 완료!")
+            st.session_state.stacks = {
+                "stack_V": stack_V, "stack_B": stack_B,
+                "bin_factor": 1,
+                "log_text": "pre-stacked FITS loaded from ZIP",
+            }
+            st.session_state.stars = []
+            st.session_state.cmd_base = None
+            st.session_state.next_id = 0
+            st.info(f"스택 파일 로드: {stack_V.shape[1]}x{stack_V.shape[0]} px")
+            _load_wcs_and_catalog(stack_V,
+                os.path.join(out_dir, "stack_V.fits"), progress, 60)
+        else:
+            # ── raw frames: classify and stack ──
+            _valid_ext = {".fit", ".fits", ".fts"}
+            _filters = {"v", "b"}
+            _subs = {"lights", "darks", "flats", "bias",
+                     "light", "dark", "flat"}
+            _sub_map = {"light": "lights", "dark": "darks", "flat": "flats"}
+            _tmpdir = _tmpmod.mkdtemp(prefix="cmd_")
+            data_dir = _tmpdir
+            _total = 0
+            for info in _zf.infolist():
                 if info.is_dir():
                     continue
                 fname = info.filename.replace("\\", "/")
@@ -333,101 +402,71 @@ if stack_clicked:
                     continue
                 dest = os.path.join(_tmpdir, det_filt, det_sub)
                 os.makedirs(dest, exist_ok=True)
-                basename = os.path.basename(fname)
-                with open(os.path.join(dest, basename), "wb") as f:
-                    f.write(zf.read(info.filename))
+                with open(os.path.join(dest, os.path.basename(fname)),
+                          "wb") as f:
+                    f.write(_zf.read(info.filename))
                 _total += 1
+            _zf.close()
 
-        if _total == 0:
-            st.error("ZIP에서 분류 가능한 FITS가 없습니다.\n"
-                     "폴더 구조: `V/lights/`, `B/darks/` 등")
-        else:
             ok = True
-            v_lights = os.path.join(_tmpdir, "V", "lights")
-            b_lights = os.path.join(_tmpdir, "B", "lights")
-            if not os.path.isdir(v_lights):
-                st.error("ZIP 안에 V/lights 폴더가 없습니다."); ok = False
-            if not os.path.isdir(b_lights):
-                st.error("ZIP 안에 B/lights 폴더가 없습니다."); ok = False
+            if _total == 0:
+                st.error("ZIP에서 분류 가능한 FITS가 없습니다.\n"
+                         "폴더 구조: `V/lights/`, `B/darks/` 등\n"
+                         "또는 `stack_V.fits` + `stack_B.fits`")
+                ok = False
+            else:
+                v_lights = os.path.join(_tmpdir, "V", "lights")
+                b_lights = os.path.join(_tmpdir, "B", "lights")
+                if not os.path.isdir(v_lights):
+                    st.error("ZIP에 V/lights 폴더가 없습니다."); ok = False
+                if not os.path.isdir(b_lights):
+                    st.error("ZIP에 B/lights 폴더가 없습니다."); ok = False
 
-    if ok:
-        v_files = pipe.find_fits(v_lights)
-        b_files = pipe.find_fits(b_lights)
-        if not v_files or not b_files:
-            st.error("FITS 파일이 없습니다."); ok = False
-    if ok:
-        st.info(f"V: {len(v_files)}장 / B: {len(b_files)}장  |  bin={bin_factor}")
-        log_lines: list[str] = []
-        mf = None if max_frames == 0 else max_frames
-        os.makedirs(out_dir, exist_ok=True)
-        old_stdout = sys.stdout
-        sys.stdout = _LogCapture(log_lines)
-        t0 = time.time()
-        progress = st.progress(0, text="스택 시작...")
-        try:
-            progress.progress(10, text="V 필터 정렬 + 스택 ...")
-            stack_V, ref = pipe.process_filter(data_dir, "V", bin_factor, mf, None)
-            progress.progress(50, text="B 필터 정렬 + 스택 ...")
-            stack_B, _ = pipe.process_filter(data_dir, "B", bin_factor, mf, ref)
-            from astropy.io import fits as afits
-            afits.writeto(os.path.join(out_dir, "stack_V.fits"),
-                          stack_V.astype(np.float32), overwrite=True)
-            afits.writeto(os.path.join(out_dir, "stack_B.fits"),
-                          stack_B.astype(np.float32), overwrite=True)
-            elapsed = time.time() - t0
-            progress.progress(70, text=f"스택 완료! ({elapsed:.1f}초)")
-            st.session_state.stacks = {
-                "stack_V": stack_V, "stack_B": stack_B,
-                "bin_factor": bin_factor,
-                "log_text": "\n".join(log_lines),
-            }
-            st.session_state.stars = []
-            st.session_state.cmd_base = None
-            st.session_state.next_id = 0
-
-            # ── read WCS from FITS header + APASS catalog ──
-            progress.progress(75, text="FITS 헤더에서 WCS 읽는 중...")
-            try:
-                from astropy.wcs import WCS as _WCS
-                _vfits = os.path.join(out_dir, "stack_V.fits")
-                from astropy.io import fits as _afits
-                with _afits.open(_vfits) as _hdul:
-                    _wcs = _WCS(_hdul[0].header)
-                if _wcs.has_celestial:
-                    st.session_state.plate_wcs = _wcs
-                    progress.progress(85, text="APASS 카탈로그 조회 중...")
-                    _cy_px = stack_V.shape[0] / 2
-                    _cx_px = stack_V.shape[1] / 2
-                    _ra_c, _dec_c = _wcs.all_pix2world(_cx_px, _cy_px, 0)
-                    _corner_ra, _corner_dec = _wcs.all_pix2world(0, 0, 0)
-                    _rad = max(abs(float(_ra_c - _corner_ra)),
-                               abs(float(_dec_c - _corner_dec))) + 0.1
-                    _rad = max(0.2, min(_rad, 2.0))
-                    _cat = psolver.query_apass(
-                        float(_ra_c), float(_dec_c), _rad)
-                    st.session_state.plate_catalog = _cat
-                    if _cat is not None:
-                        progress.progress(100,
-                            text=f"완료! 카탈로그 {len(_cat)}개 별 로드")
-                    else:
-                        progress.progress(100,
-                            text="WCS 확인, 카탈로그 별 없음")
-                else:
-                    st.session_state.plate_wcs = None
-                    st.session_state.plate_catalog = None
-                    progress.progress(100, text="스택 완료 (WCS 헤더 없음)")
-                    st.warning("FITS 헤더에 WCS 정보가 없습니다.")
-            except Exception as _pe:
-                st.session_state.plate_wcs = None
-                st.session_state.plate_catalog = None
-                progress.progress(100, text="스택 완료 (WCS 읽기 실패)")
-                st.warning(f"WCS 읽기 실패: {_pe}")
-        except Exception as e:
-            st.error(f"스택 오류: {e}")
-            import traceback
-            st.code(traceback.format_exc(), language=None)
-        finally:
-            sys.stdout = old_stdout
+            if ok:
+                v_files = pipe.find_fits(v_lights)
+                b_files = pipe.find_fits(b_lights)
+                if not v_files or not b_files:
+                    st.error("FITS 파일이 없습니다."); ok = False
+            if ok:
+                st.info(f"V: {len(v_files)}장 / B: {len(b_files)}장  "
+                        f"|  bin={bin_factor}")
+                log_lines: list[str] = []
+                mf = None if max_frames == 0 else max_frames
+                os.makedirs(out_dir, exist_ok=True)
+                old_stdout = sys.stdout
+                sys.stdout = _LogCapture(log_lines)
+                t0 = time.time()
+                progress = st.progress(0, text="스택 시작...")
+                try:
+                    progress.progress(10, text="V 필터 정렬 + 스택 ...")
+                    stack_V, ref = pipe.process_filter(
+                        data_dir, "V", bin_factor, mf, None)
+                    progress.progress(50, text="B 필터 정렬 + 스택 ...")
+                    stack_B, _ = pipe.process_filter(
+                        data_dir, "B", bin_factor, mf, ref)
+                    from astropy.io import fits as afits
+                    afits.writeto(os.path.join(out_dir, "stack_V.fits"),
+                                  stack_V.astype(np.float32), overwrite=True)
+                    afits.writeto(os.path.join(out_dir, "stack_B.fits"),
+                                  stack_B.astype(np.float32), overwrite=True)
+                    elapsed = time.time() - t0
+                    progress.progress(70, text=f"스택 완료! ({elapsed:.1f}초)")
+                    st.session_state.stacks = {
+                        "stack_V": stack_V, "stack_B": stack_B,
+                        "bin_factor": bin_factor,
+                        "log_text": "\n".join(log_lines),
+                    }
+                    st.session_state.stars = []
+                    st.session_state.cmd_base = None
+                    st.session_state.next_id = 0
+                    _load_wcs_and_catalog(stack_V,
+                        os.path.join(out_dir, "stack_V.fits"), progress)
+                except Exception as e:
+                    st.error(f"스택 오류: {e}")
+                    import traceback
+                    st.code(traceback.format_exc(), language=None)
+                finally:
+                    sys.stdout = old_stdout
 
 # ═══════════════════════════════════════════════════════════════════════════
 # CSV LOAD

@@ -249,16 +249,17 @@ def _auto_fit_cb():
 
 
 # ── sidebar ───────────────────────────────────────────────────────────────
+import tempfile as _tmpmod
+
 with st.sidebar:
     st.title("⭐ CMD Pipeline")
     st.caption("MaximDL 스타일 수동 구경측광")
 
-    st.header("📁 데이터")
-    _data_dir = st.text_input("데이터 폴더", value="data",
-                              help="V/lights/ 와 B/lights/ 가 있는 폴더")
-    _out_dir = st.text_input("결과 폴더", value="results")
-    data_dir = _data_dir if os.path.isabs(_data_dir) else os.path.join(SCRIPT_DIR, _data_dir)
-    out_dir = _out_dir if os.path.isabs(_out_dir) else os.path.join(SCRIPT_DIR, _out_dir)
+    st.header("📤 ZIP 업로드")
+    st.caption("V/lights, B/lights 등 폴더 구조 ZIP")
+    _zip_upload = st.file_uploader(
+        "ZIP 업로드", type=["zip"], key="zip_up",
+        help="V/lights, V/darks, B/lights 등 폴더 구조 그대로 압축")
 
     st.header("⚙️ 스택")
     sc1, sc2 = st.columns(2)
@@ -267,6 +268,10 @@ with st.sidebar:
     with sc2:
         max_frames = st.number_input("최대 프레임", 0, 200, 15, help="0=전부")
 
+    stack_clicked = st.button("🚀 스택 실행", type="primary",
+                              use_container_width=True)
+
+    st.divider()
     st.header("🔭 구경 파라미터")
     r_ap = st.slider("구경 반지름 (px)", 2, 25, 6, help="별빛을 수집하는 원 반지름")
     r_in = st.slider("배경고리 안쪽 (px)", 4, 35, 10)
@@ -280,107 +285,12 @@ with st.sidebar:
     member_frac = st.slider("멤버 반경 비율", 0.10, 0.80, 0.35, 0.05)
 
     st.divider()
-    st.header("📤 데이터 업로드")
-    st.caption("ZIP 파일 하나로 자동 분류 (폴더명 기준)")
-    _zip_upload = st.file_uploader(
-        "ZIP 업로드", type=["zip"], key="zip_up",
-        help="V/lights, V/darks, B/lights 등 폴더 구조 그대로 압축")
-    if st.button("📦 ZIP 업로드 & 분류", use_container_width=True):
-        if _zip_upload is None:
-            st.warning("ZIP 파일을 먼저 선택하세요")
-        else:
-            import zipfile
-            _valid_ext = {".fit", ".fits", ".fts"}
-            _filters = {"v", "b"}
-            _subs = {"lights", "darks", "flats", "bias", "light", "dark", "flat"}
-            _sub_map = {"light": "lights", "dark": "darks", "flat": "flats"}
-            _total = 0
-            _msg = []
-            with zipfile.ZipFile(io.BytesIO(_zip_upload.getvalue())) as zf:
-                for info in zf.infolist():
-                    if info.is_dir():
-                        continue
-                    fname = info.filename.replace("\\", "/")
-                    ext = os.path.splitext(fname)[1].lower()
-                    if ext not in _valid_ext:
-                        continue
-                    parts = [p.lower() for p in fname.split("/") if p]
-                    det_filt = det_sub = None
-                    for p in parts:
-                        if p in _filters:
-                            det_filt = p.upper()
-                        if p in _subs:
-                            det_sub = _sub_map.get(p, p)
-                    if det_filt is None or det_sub is None:
-                        continue
-                    dest = os.path.join(data_dir, det_filt, det_sub)
-                    os.makedirs(dest, exist_ok=True)
-                    basename = os.path.basename(fname)
-                    with open(os.path.join(dest, basename), "wb") as f:
-                        f.write(zf.read(info.filename))
-                    _total += 1
-                    _msg.append(f"{det_filt}/{det_sub}")
-            if _total == 0:
-                st.error("분류 가능한 FITS 파일이 없습니다.\n"
-                         "폴더 구조: `V/lights/`, `B/darks/` 등")
-            else:
-                from collections import Counter
-                _counts = Counter(_msg)
-                _summary = ", ".join(f"{k}: {v}장" for k, v in sorted(_counts.items()))
-                st.success(f"총 {_total}장 분류 완료! {_summary}")
-
-    with st.expander("개별 파일 업로드", expanded=False):
-        st.caption("폴더별로 직접 선택")
-        _fits_types = ["fit", "fits", "fts"]
-        for _filt in ["V", "B"]:
-            with st.expander(f"**{_filt} 필터**", expanded=False):
-                _ul = {}
-                for _sub in ["lights", "darks", "flats", "bias"]:
-                    _ul[_sub] = st.file_uploader(
-                        f"{_filt}/{_sub}", type=_fits_types,
-                        accept_multiple_files=True,
-                        key=f"{_filt}_{_sub}_up")
-                st.session_state[f"_upload_{_filt}"] = _ul
-        if st.button("📤 업로드 저장", use_container_width=True):
-            _total = 0
-            _msg = []
-            for _filt in ["V", "B"]:
-                _ul = st.session_state.get(f"_upload_{_filt}", {})
-                for _sub, files in _ul.items():
-                    if files:
-                        dest = os.path.join(data_dir, _filt, _sub)
-                        os.makedirs(dest, exist_ok=True)
-                        for uf in files:
-                            with open(os.path.join(dest, uf.name), "wb") as f:
-                                f.write(uf.getbuffer())
-                        _total += len(files)
-                        _msg.append(f"{_filt}/{_sub}: {len(files)}")
-            if _total == 0:
-                st.warning("FITS 파일을 먼저 선택하세요")
-            else:
-                st.success(f"저장 완료! {', '.join(_msg)}")
-
-    st.divider()
-    if st.button("🧪 데모 데이터 생성", use_container_width=True):
-        with st.spinner("데모 데이터 생성 중..."):
-            import subprocess
-            r = subprocess.run(
-                [sys.executable, os.path.join(SCRIPT_DIR, "make_demo_data.py"),
-                 "--out", os.path.join(SCRIPT_DIR, "data")],
-                capture_output=True, text=True, cwd=SCRIPT_DIR)
-            if r.returncode == 0:
-                st.success("data/ 에 데모 데이터 생성 완료!")
-            else:
-                st.error(r.stderr or r.stdout)
-
-    stack_clicked = st.button("🚀 스택 실행", type="primary",
-                              use_container_width=True)
-
-    st.divider()
     st.header("📂 CSV 불러오기")
     st.caption("이전 측정 결과 CSV로 보정 단계부터")
     csv_upload = st.file_uploader("photometry CSV", type=["csv"], key="csv_up")
     csv_load_clicked = st.button("📂 CSV로 시작", use_container_width=True)
+
+out_dir = os.path.join(SCRIPT_DIR, "results")
 
 # ── main header ───────────────────────────────────────────────────────────
 st.header("CMD 파이프라인 — 수동 구경측광 모드")
@@ -389,13 +299,57 @@ st.header("CMD 파이프라인 — 수동 구경측광 모드")
 # STACKING
 # ═══════════════════════════════════════════════════════════════════════════
 if stack_clicked:
-    v_lights = os.path.join(data_dir, "V", "lights")
-    b_lights = os.path.join(data_dir, "B", "lights")
-    ok = True
-    if not os.path.isdir(v_lights):
-        st.error(f"V 폴더 없음: `{v_lights}`"); ok = False
-    if not os.path.isdir(b_lights):
-        st.error(f"B 폴더 없음: `{b_lights}`"); ok = False
+    ok = False
+    data_dir = None
+    v_lights = b_lights = ""
+    if _zip_upload is None:
+        st.error("ZIP 파일을 먼저 업로드하세요.")
+    else:
+        import zipfile
+        _valid_ext = {".fit", ".fits", ".fts"}
+        _filters = {"v", "b"}
+        _subs = {"lights", "darks", "flats", "bias", "light", "dark", "flat"}
+        _sub_map = {"light": "lights", "dark": "darks", "flat": "flats"}
+
+        _tmpdir = _tmpmod.mkdtemp(prefix="cmd_")
+        data_dir = _tmpdir
+        _total = 0
+        with zipfile.ZipFile(io.BytesIO(_zip_upload.getvalue())) as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                fname = info.filename.replace("\\", "/")
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in _valid_ext:
+                    continue
+                parts = [p.lower() for p in fname.split("/") if p]
+                det_filt = det_sub = None
+                for p in parts:
+                    if p in _filters:
+                        det_filt = p.upper()
+                    if p in _subs:
+                        det_sub = _sub_map.get(p, p)
+                if det_filt is None or det_sub is None:
+                    continue
+                dest = os.path.join(_tmpdir, det_filt, det_sub)
+                os.makedirs(dest, exist_ok=True)
+                basename = os.path.basename(fname)
+                with open(os.path.join(dest, basename), "wb") as f:
+                    f.write(zf.read(info.filename))
+                _total += 1
+
+        if _total == 0:
+            st.error("ZIP에서 분류 가능한 FITS가 없습니다.\n"
+                     "폴더 구조: `V/lights/`, `B/darks/` 등")
+        else:
+            ok = True
+            v_lights = os.path.join(_tmpdir, "V", "lights")
+            b_lights = os.path.join(_tmpdir, "B", "lights")
+            if not os.path.isdir(v_lights):
+                st.error("ZIP 안에 V/lights 폴더가 없습니다."); ok = False
+            if not os.path.isdir(b_lights):
+                st.error("ZIP 안에 B/lights 폴더가 없습니다."); ok = False
+
     if ok:
         v_files = pipe.find_fits(v_lights)
         b_files = pipe.find_fits(b_lights)

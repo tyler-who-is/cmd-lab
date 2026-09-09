@@ -279,22 +279,34 @@ with st.sidebar:
     st.divider()
     st.header("📤 FITS 업로드")
     st.caption("관측 FITS 파일을 직접 업로드 (클라우드용)")
-    v_uploads = st.file_uploader("V 필터 FITS", type=["fit", "fits", "fts"],
-                                  accept_multiple_files=True, key="v_fits_up")
-    b_uploads = st.file_uploader("B 필터 FITS", type=["fit", "fits", "fts"],
-                                  accept_multiple_files=True, key="b_fits_up")
+    _fits_types = ["fit", "fits", "fts"]
+    for _filt in ["V", "B"]:
+        with st.expander(f"**{_filt} 필터**", expanded=False):
+            _ul = {}
+            for _sub in ["lights", "darks", "flats", "bias"]:
+                _ul[_sub] = st.file_uploader(
+                    f"{_filt}/{_sub}", type=_fits_types,
+                    accept_multiple_files=True,
+                    key=f"{_filt}_{_sub}_up")
+            st.session_state[f"_upload_{_filt}"] = _ul
     if st.button("📤 업로드 저장", use_container_width=True):
-        if not v_uploads and not b_uploads:
+        _total = 0
+        _msg = []
+        for _filt in ["V", "B"]:
+            _ul = st.session_state.get(f"_upload_{_filt}", {})
+            for _sub, files in _ul.items():
+                if files:
+                    dest = os.path.join(data_dir, _filt, _sub)
+                    os.makedirs(dest, exist_ok=True)
+                    for uf in files:
+                        with open(os.path.join(dest, uf.name), "wb") as f:
+                            f.write(uf.getbuffer())
+                    _total += len(files)
+                    _msg.append(f"{_filt}/{_sub}: {len(files)}")
+        if _total == 0:
             st.warning("FITS 파일을 먼저 선택하세요")
         else:
-            for filt, files in [("V", v_uploads), ("B", b_uploads)]:
-                dest = os.path.join(data_dir, filt, "lights")
-                os.makedirs(dest, exist_ok=True)
-                for uf in files:
-                    with open(os.path.join(dest, uf.name), "wb") as f:
-                        f.write(uf.getbuffer())
-            nv, nb = len(v_uploads), len(b_uploads)
-            st.success(f"저장 완료! V={nv}장, B={nb}장")
+            st.success(f"저장 완료! {', '.join(_msg)}")
 
     st.divider()
     if st.button("🧪 데모 데이터 생성", use_container_width=True):

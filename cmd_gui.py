@@ -17,6 +17,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
+from streamlit_plotly_events import plotly_events
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
@@ -28,7 +29,7 @@ st.set_page_config(page_title="CMD Pipeline", page_icon="⭐", layout="wide")
 # ── session state ─────────────────────────────────────────────────────────
 for _k, _v in [("stacks", None), ("stars", []),
                 ("cmd_base", None), ("next_id", 0),
-                ("plate_matches", None)]:
+                ("plate_matches", None), ("click_xy", None)]:
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
@@ -538,8 +539,17 @@ if stacks is not None:
                     x1=s["x"]+r_out, y1=s["y"]+r_out,
                     line=dict(color="gold", width=1, dash="dot"))
 
+        _cxy = st.session_state.get("click_xy")
+        if _cxy:
+            fig_map.add_trace(go.Scatter(
+                x=[_cxy[0]], y=[_cxy[1]], mode="markers",
+                marker=dict(size=18, color="red", symbol="cross-thin",
+                            line=dict(width=3, color="red")),
+                showlegend=False, hoverinfo="skip",
+            ))
+
         fig_map.update_layout(
-            width=560, height=560,
+            height=560,
             xaxis=dict(title="X (px)", constrain="domain", range=[-5, w+5]),
             yaxis=dict(title="Y (px)", scaleanchor="x", constrain="domain",
                        range=[-5, h+5]),
@@ -547,20 +557,29 @@ if stacks is not None:
             margin=dict(l=50, r=10, t=10, b=50),
             dragmode="zoom",
         )
-        st.plotly_chart(fig_map, key="star_map")
-        st.caption(f"🟢 측정된 별  |  이미지: {w}×{h} px (bin={bfac})  "
-                   f"|  마우스 hover로 좌표 확인")
+        _clicked = plotly_events(fig_map, click_event=True,
+                                 select_event=False, hover_event=False,
+                                 override_height=560, key="star_map")
+        if _clicked:
+            _pt = _clicked[0]
+            _nx = max(0, min(int(round(float(_pt["x"]))), w - 1))
+            _ny = max(0, min(int(round(float(_pt["y"]))), h - 1))
+            st.session_state.click_xy = (_nx, _ny)
+            st.session_state.inp_x = _nx
+            st.session_state.inp_y = _ny
+
+        st.caption(f"👆 **이미지 클릭으로 별 선택**  |  🟢 측정됨  🔴 선택  "
+                   f"|  {w}×{h} px (bin={bfac})")
 
     # ── measurement controls ──────────────────────────────────
     with col_ctrl:
         _is_first = len(stars) == 0
         if _is_first:
             st.markdown("**1단계: 표준성 측정**")
-            st.caption("실제 등급을 아는 별을 먼저 측정하세요. "
-                       "hover로 좌표 확인 → 입력 → 별 측정")
+            st.caption("실제 등급을 아는 별을 이미지에서 클릭하세요")
         else:
-            st.markdown("**별 위치 입력**")
-            st.caption("hover로 좌표 확인 → 입력")
+            st.markdown("**별 선택**")
+            st.caption("이미지 클릭 또는 좌표 직접 입력")
         mc1, mc2 = st.columns(2)
         with mc1:
             inp_x = st.number_input("X", value=w // 2, min_value=0,
@@ -572,7 +591,7 @@ if stacks is not None:
         fig_cut = _cutout_fig(stack_V, inp_x, inp_y, r_ap, r_in, r_out)
         st.pyplot(fig_cut)
         plt.close(fig_cut)
-        st.caption("🟢 구경  🟡 배경고리  🔴 입력 위치")
+        st.caption("🟢 구경  🟡 배경고리  🔴 선택 위치")
 
         if st.button("⭐ 별 측정", type="primary", use_container_width=True):
             cx, cy = _find_centroid(stack_V, inp_x, inp_y, centroid_box)
@@ -595,6 +614,7 @@ if stacks is not None:
                     st.caption(f"중심 보정: ({inp_x}, {inp_y}) → ({cx:.1f}, {cy:.1f})")
             else:
                 st.warning(f"별 #{sid}: 유효한 플럭스 없음 (구경/위치 확인)")
+            st.session_state.click_xy = None
             st.rerun()
 
         # ── star list ──────────────────────────────────────────

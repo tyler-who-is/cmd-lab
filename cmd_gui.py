@@ -28,7 +28,8 @@ st.set_page_config(page_title="CMD Pipeline", page_icon="⭐", layout="wide")
 # ── session state ─────────────────────────────────────────────────────────
 for _k, _v in [("stacks", None), ("stars", []),
                 ("cmd_base", None), ("next_id", 0),
-                ("plate_matches", None), ("click_xy", None)]:
+                ("plate_matches", None), ("click_xy", None),
+                ("plate_wcs", None), ("plate_catalog", None)]:
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
@@ -420,7 +421,7 @@ if stack_clicked:
             afits.writeto(os.path.join(out_dir, "stack_B.fits"),
                           stack_B.astype(np.float32), overwrite=True)
             elapsed = time.time() - t0
-            progress.progress(100, text=f"스택 완료! ({elapsed:.1f}초)")
+            progress.progress(70, text=f"스택 완료! ({elapsed:.1f}초)")
             st.session_state.stacks = {
                 "stack_V": stack_V, "stack_B": stack_B,
                 "bin_factor": bin_factor,
@@ -429,6 +430,37 @@ if stack_clicked:
             st.session_state.stars = []
             st.session_state.cmd_base = None
             st.session_state.next_id = 0
+
+            # ── auto plate solve + catalog ──
+            progress.progress(75, text="플레이트 솔빙 중 (3~5분 소요)...")
+            try:
+                _vfits = os.path.join(out_dir, "stack_V.fits")
+                _wcs = psolver.solve_image(
+                    _vfits,
+                    on_status=lambda m: progress.progress(
+                        80, text=f"솔빙: {m}"))
+                st.session_state.plate_wcs = _wcs
+                progress.progress(90, text="APASS 카탈로그 조회 중...")
+                _cy_px, _cx_px = stack_V.shape[0] / 2, stack_V.shape[1] / 2
+                _ra_c, _dec_c = _wcs.all_pix2world(_cx_px, _cy_px, 0)
+                _corner_ra, _corner_dec = _wcs.all_pix2world(0, 0, 0)
+                _rad = max(abs(float(_ra_c - _corner_ra)),
+                           abs(float(_dec_c - _corner_dec))) + 0.1
+                _rad = max(0.2, min(_rad, 2.0))
+                _cat = psolver.query_apass(
+                    float(_ra_c), float(_dec_c), _rad)
+                st.session_state.plate_catalog = _cat
+                if _cat is not None:
+                    progress.progress(100,
+                        text=f"완료! 카탈로그 {len(_cat)}개 별 로드")
+                else:
+                    progress.progress(100,
+                        text="솔빙 완료, 카탈로그 별 없음")
+            except Exception as _pe:
+                st.session_state.plate_wcs = None
+                st.session_state.plate_catalog = None
+                progress.progress(100, text="스택 완료 (솔빙 실패)")
+                st.warning(f"플레이트 솔빙 실패 — 수동 입력 필요: {_pe}")
         except Exception as e:
             st.error(f"스택 오류: {e}")
             import traceback
@@ -627,17 +659,49 @@ if stacks is not None:
             mB, fB, snr_B = _measure_star(stack_B, cx, cy, r_ap, r_in, r_out)
             sid = st.session_state.next_id
             st.session_state.next_id += 1
-            st.session_state.stars.append({
+            _star_entry = {
                 "id": sid,
                 "x": round(cx, 2), "y": round(cy, 2),
                 "instr_V": round(mV, 4) if np.isfinite(mV) else np.nan,
                 "instr_B": round(mB, 4) if np.isfinite(mB) else np.nan,
                 "snr_V": round(snr_V, 1),
-            })
+            }
+            # auto catalog match
+            _pwcs = st.session_state.get("plate_wcs")
+            _pcat = st.session_state.get("plate_catalog")
+            if _pwcs is not None and _pcat is not None:
+                try:
+                    from astropy.coordinates import SkyCoord
+                    import astropy.units as u
+                    _ra, _dec = _pwcs.all_pix2world(cx, cy, 0)
+                    _sc = SkyCoord(ra=float(_ra)*u.deg,
+                                   dec=float(_dec)*u.deg)
+                    _cc = SkyCoord(ra=_pcat["RAJ2000"],
+                                   dec=_pcat["DEJ2000"])
+                    _mi, _ms, _ = _sc.match_to_catalog_sky(_cc)
+                    if _ms.arcsec < 10:
+                        _star_entry["cat_V"] = round(
+                            float(_pcat["Vmag"][_mi]), 3)
+                        _star_entry["cat_B"] = round(
+                            float(_pcat["Bmag"][_mi]), 3)
+                except Exception:
+                    pass
+
+            st.session_state.stars.append(_star_entry)
+
+            # auto-fill std magnitudes for the first star (standard star)
+            if sid == 0 and "cat_V" in _star_entry:
+                st.session_state.std_V = _star_entry["cat_V"]
+                st.session_state.std_B = _star_entry["cat_B"]
+
             if np.isfinite(mV):
-                st.success(f"별 #{sid} 측정 완료!  "
-                           f"V={mV:.3f}  B={mB:.3f}  B-V={mB-mV:.3f}  "
-                           f"SNR={snr_V:.0f}")
+                _msg = (f"별 #{sid} 측정 완료!  "
+                        f"V={mV:.3f}  B={mB:.3f}  B-V={mB-mV:.3f}  "
+                        f"SNR={snr_V:.0f}")
+                if "cat_V" in _star_entry:
+                    _msg += (f"\n카탈로그: V={_star_entry['cat_V']:.3f}  "
+                             f"B={_star_entry['cat_B']:.3f}")
+                st.success(_msg)
                 if abs(cx - inp_x) > 0.5 or abs(cy - inp_y) > 0.5:
                     st.caption(f"중심 보정: ({inp_x}, {inp_y}) → ({cx:.1f}, {cy:.1f})")
             else:
@@ -683,16 +747,23 @@ if stacks is not None:
                 st.caption(f"기기등급  V={_std['instr_V']:.3f}  "
                            f"B={_std['instr_B']:.3f}")
 
-                _pm = st.session_state.get("plate_matches")
                 _def_sV, _def_sB = 0.0, 0.0
-                if _pm:
-                    _match_map = {m["star_id"]: m for m in _pm}
-                    if _std["id"] in _match_map:
-                        _def_sV = _match_map[_std["id"]]["cat_V"]
-                        _def_sB = _match_map[_std["id"]]["cat_B"]
-                        st.success(
-                            f"카탈로그 매칭: V={_def_sV:.3f}  "
-                            f"B={_def_sB:.3f}")
+                if "cat_V" in _std and "cat_B" in _std:
+                    _def_sV = _std["cat_V"]
+                    _def_sB = _std["cat_B"]
+                    st.success(
+                        f"카탈로그 자동 매칭: V={_def_sV:.3f}  "
+                        f"B={_def_sB:.3f}")
+                else:
+                    _pm = st.session_state.get("plate_matches")
+                    if _pm:
+                        _match_map = {m["star_id"]: m for m in _pm}
+                        if _std["id"] in _match_map:
+                            _def_sV = _match_map[_std["id"]]["cat_V"]
+                            _def_sB = _match_map[_std["id"]]["cat_B"]
+                            st.success(
+                                f"카탈로그 매칭: V={_def_sV:.3f}  "
+                                f"B={_def_sB:.3f}")
 
                 sc1, sc2 = st.columns(2)
                 with sc1:

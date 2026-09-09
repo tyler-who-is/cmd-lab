@@ -279,36 +279,85 @@ with st.sidebar:
     member_frac = st.slider("멤버 반경 비율", 0.10, 0.80, 0.35, 0.05)
 
     st.divider()
-    st.header("📤 FITS 업로드")
-    st.caption("관측 FITS 파일을 직접 업로드 (클라우드용)")
-    _fits_types = ["fit", "fits", "fts"]
-    for _filt in ["V", "B"]:
-        with st.expander(f"**{_filt} 필터**", expanded=False):
-            _ul = {}
-            for _sub in ["lights", "darks", "flats", "bias"]:
-                _ul[_sub] = st.file_uploader(
-                    f"{_filt}/{_sub}", type=_fits_types,
-                    accept_multiple_files=True,
-                    key=f"{_filt}_{_sub}_up")
-            st.session_state[f"_upload_{_filt}"] = _ul
-    if st.button("📤 업로드 저장", use_container_width=True):
-        _total = 0
-        _msg = []
-        for _filt in ["V", "B"]:
-            _ul = st.session_state.get(f"_upload_{_filt}", {})
-            for _sub, files in _ul.items():
-                if files:
-                    dest = os.path.join(data_dir, _filt, _sub)
-                    os.makedirs(dest, exist_ok=True)
-                    for uf in files:
-                        with open(os.path.join(dest, uf.name), "wb") as f:
-                            f.write(uf.getbuffer())
-                    _total += len(files)
-                    _msg.append(f"{_filt}/{_sub}: {len(files)}")
-        if _total == 0:
-            st.warning("FITS 파일을 먼저 선택하세요")
+    st.header("📤 데이터 업로드")
+    st.caption("ZIP 파일 하나로 자동 분류 (폴더명 기준)")
+    _zip_upload = st.file_uploader(
+        "ZIP 업로드", type=["zip"], key="zip_up",
+        help="V/lights, V/darks, B/lights 등 폴더 구조 그대로 압축")
+    if st.button("📦 ZIP 업로드 & 분류", use_container_width=True):
+        if _zip_upload is None:
+            st.warning("ZIP 파일을 먼저 선택하세요")
         else:
-            st.success(f"저장 완료! {', '.join(_msg)}")
+            import zipfile
+            _valid_ext = {".fit", ".fits", ".fts"}
+            _filters = {"v", "b"}
+            _subs = {"lights", "darks", "flats", "bias", "light", "dark", "flat"}
+            _sub_map = {"light": "lights", "dark": "darks", "flat": "flats"}
+            _total = 0
+            _msg = []
+            with zipfile.ZipFile(io.BytesIO(_zip_upload.getvalue())) as zf:
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    fname = info.filename.replace("\\", "/")
+                    ext = os.path.splitext(fname)[1].lower()
+                    if ext not in _valid_ext:
+                        continue
+                    parts = [p.lower() for p in fname.split("/") if p]
+                    det_filt = det_sub = None
+                    for p in parts:
+                        if p in _filters:
+                            det_filt = p.upper()
+                        if p in _subs:
+                            det_sub = _sub_map.get(p, p)
+                    if det_filt is None or det_sub is None:
+                        continue
+                    dest = os.path.join(data_dir, det_filt, det_sub)
+                    os.makedirs(dest, exist_ok=True)
+                    basename = os.path.basename(fname)
+                    with open(os.path.join(dest, basename), "wb") as f:
+                        f.write(zf.read(info.filename))
+                    _total += 1
+                    _msg.append(f"{det_filt}/{det_sub}")
+            if _total == 0:
+                st.error("분류 가능한 FITS 파일이 없습니다.\n"
+                         "폴더 구조: `V/lights/`, `B/darks/` 등")
+            else:
+                from collections import Counter
+                _counts = Counter(_msg)
+                _summary = ", ".join(f"{k}: {v}장" for k, v in sorted(_counts.items()))
+                st.success(f"총 {_total}장 분류 완료! {_summary}")
+
+    with st.expander("개별 파일 업로드", expanded=False):
+        st.caption("폴더별로 직접 선택")
+        _fits_types = ["fit", "fits", "fts"]
+        for _filt in ["V", "B"]:
+            with st.expander(f"**{_filt} 필터**", expanded=False):
+                _ul = {}
+                for _sub in ["lights", "darks", "flats", "bias"]:
+                    _ul[_sub] = st.file_uploader(
+                        f"{_filt}/{_sub}", type=_fits_types,
+                        accept_multiple_files=True,
+                        key=f"{_filt}_{_sub}_up")
+                st.session_state[f"_upload_{_filt}"] = _ul
+        if st.button("📤 업로드 저장", use_container_width=True):
+            _total = 0
+            _msg = []
+            for _filt in ["V", "B"]:
+                _ul = st.session_state.get(f"_upload_{_filt}", {})
+                for _sub, files in _ul.items():
+                    if files:
+                        dest = os.path.join(data_dir, _filt, _sub)
+                        os.makedirs(dest, exist_ok=True)
+                        for uf in files:
+                            with open(os.path.join(dest, uf.name), "wb") as f:
+                                f.write(uf.getbuffer())
+                        _total += len(files)
+                        _msg.append(f"{_filt}/{_sub}: {len(files)}")
+            if _total == 0:
+                st.warning("FITS 파일을 먼저 선택하세요")
+            else:
+                st.success(f"저장 완료! {', '.join(_msg)}")
 
     st.divider()
     if st.button("🧪 데모 데이터 생성", use_container_width=True):

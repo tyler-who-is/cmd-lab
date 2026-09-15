@@ -256,15 +256,15 @@ with st.sidebar:
     st.caption("MaximDL 스타일 수동 구경측광")
 
     st.header("📤 ZIP 업로드")
-    st.caption("V/lights, B/lights 등 폴더 구조 ZIP")
+    st.caption("stack_V/B.fits 또는 V/lights, B/lights 폴더 구조")
     _zip_upload = st.file_uploader(
         "ZIP 업로드", type=["zip"], key="zip_up",
-        help="V/lights, V/darks, B/lights 등 폴더 구조 그대로 압축")
+        help="stack_V.fits + stack_B.fits (pre-stacked) 또는 V/lights, B/lights 폴더 구조")
 
     st.header("⚙️ 스택")
     sc1, sc2 = st.columns(2)
     with sc1:
-        bin_factor = st.number_input("Binning", 1, 8, 2)
+        bin_factor = st.number_input("Binning", 1, 8, 8)
     with sc2:
         max_frames = st.number_input("최대 프레임", 0, 200, 15, help="0=전부")
 
@@ -538,7 +538,17 @@ if stacks is not None:
         fig_map = go.Figure()
         fig_map.add_trace(go.Heatmap(
             z=img_small, x=xs, y=ys,
-            colorscale="gray", showscale=False, hoverinfo="x+y",
+            colorscale="gray", showscale=False, hoverinfo="skip",
+        ))
+        # invisible scatter grid for box-selection support
+        _gstep = max(1, max(w, h) // 80)
+        _gx = np.arange(0, w, _gstep, dtype=float)
+        _gy = np.arange(0, h, _gstep, dtype=float)
+        _gxx, _gyy = np.meshgrid(_gx, _gy)
+        fig_map.add_trace(go.Scatter(
+            x=_gxx.ravel(), y=_gyy.ravel(), mode="markers",
+            marker=dict(size=3, opacity=0.005, color="white"),
+            showlegend=False, hoverinfo="x+y",
         ))
 
         # measured stars
@@ -939,6 +949,24 @@ if stacks is not None:
                 st.plotly_chart(fig, use_container_width=True,
                                 key="cmd_fit_chart")
 
+            # ── result summary card ──────────────────────────
+            st.divider()
+            st.subheader("📋 결과 요약 (활동지 기록용)")
+            rc1, rc2, rc3 = st.columns(3)
+            with rc1:
+                st.metric("추정 거리", f"{_dpc:.0f} pc")
+            with rc2:
+                st.metric("추정 나이", _format_age(_age))
+            with rc3:
+                st.metric("거리지수 (μ)", f"{fit_mu:.2f}")
+            rc4, rc5, rc6 = st.columns(3)
+            with rc4:
+                st.metric("E(B−V)", f"{fit_ebv:.3f}")
+            with rc5:
+                st.metric("턴오프 B−V", f"{fit_to:.2f}")
+            with rc6:
+                st.metric("턴오프 분광형", f"~{_spt}")
+
             # ── downloads ────────────────────────────────────
             _df_save = pd.DataFrame({
                 "id": _ids,
@@ -1018,12 +1046,109 @@ elif stacks is None and not stack_clicked:
         """
         ### 사용 방법
 
-        1. **스택 실행** → V/B 이미지 자동 정렬 + 합산
-        2. 스택 이미지에서 **별 좌표 확인** → X, Y 입력 → **별 측정**
-        3. 구경/배경고리를 사이드바에서 조절하며 반복
-        4. 별이 2개 이상이면 **CMD 생성** 가능
-        5. 기준별의 실제 등급을 입력 → **주계열 맞추기** (거리 + 나이 추정)
-
-        데모 데이터가 없으면 **🧪 데모 데이터 생성** 버튼을 먼저 눌러주세요.
+        1. 왼쪽 사이드바에서 **ZIP 파일 업로드** (Result.zip 등)
+        2. Binning을 최대(8)로 설정 → **스택 실행**
+        3. 스택 이미지에서 별 주위를 **드래그** → **별 측정** (인당 10~15개)
+        4. 첫 번째 별이 표준성 → 카탈로그 자동 매칭
+        5. 별이 2개 이상이면 **CMD 생성** → **주계열 맞추기**
+        6. 슬라이더로 거리지수/턴오프 조절 → 거리·나이 추정
         """
     )
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ANSWER KEY (password-protected)
+# ═══════════════════════════════════════════════════════════════════════════
+st.divider()
+with st.expander("🔒 정답 확인 (교사용)", expanded=False):
+    _ans_pw = st.text_input("비밀번호", type="password", key="ans_pw")
+    if _ans_pw == "m67cmd":
+        st.success("인증 완료")
+        _ans_csv = os.path.join(SCRIPT_DIR, "m67_answer.csv")
+        if os.path.isfile(_ans_csv):
+            _ans_df = pd.read_csv(_ans_csv)
+            _ans_df.columns = [c.strip() for c in _ans_df.columns]
+            if "B-V" in _ans_df.columns and "V" in _ans_df.columns:
+                _ans_bv = _ans_df["B-V"].values
+                _ans_v = _ans_df["V"].values
+                _mask = np.isfinite(_ans_bv) & np.isfinite(_ans_v)
+                _ans_bv = _ans_bv[_mask]
+                _ans_v = _ans_v[_mask]
+
+                st.subheader("📊 M67 색등급도 (APASS 카탈로그)")
+                st.caption(f"별 {len(_ans_bv)}개  |  APASS DR9 V, B−V")
+
+                _zams = pipe.load_zams()
+
+                ac1, ac2 = st.columns([2, 5])
+                with ac1:
+                    st.markdown("**성간소광**")
+                    _a_ebv = st.slider("E(B−V) ", 0.0, 1.0, 0.04, 0.01,
+                                       key="ans_ebv")
+                    st.markdown("**거리**")
+                    _a_mu = st.slider("거리지수 μ ", 5.0, 15.0, 9.70, 0.05,
+                                      key="ans_mu")
+                    _a_dpc = 10 ** (1 + _a_mu / 5.0)
+                    st.metric("추정 거리", f"{_a_dpc:.0f} pc")
+
+                    st.markdown("**턴오프**")
+                    _a_to = st.slider("턴오프 B−V ", -0.35, 1.50, 0.45, 0.01,
+                                      key="ans_to")
+                    _a_age, _a_spt = _turnoff_age(_a_to)
+                    st.metric("추정 나이", _format_age(_a_age))
+                    st.caption(f"턴오프 분광형 ~{_a_spt}")
+
+                with ac2:
+                    _a_AV = 3.1 * _a_ebv
+                    _a_Vc = _ans_v - _a_AV
+                    _a_BVc = _ans_bv - _a_ebv
+
+                    _afig = go.Figure()
+                    _afig.add_trace(go.Scatter(
+                        x=_a_BVc, y=_a_Vc, mode="markers",
+                        marker=dict(size=4, color="steelblue", opacity=0.6),
+                        name=f"APASS ({len(_a_BVc)})",
+                    ))
+                    _afig.add_trace(go.Scatter(
+                        x=_zams.B_V, y=_zams.M_V + _a_mu,
+                        mode="lines",
+                        line=dict(color="red", dash="dash", width=2),
+                        name=f"ZAMS (d≈{_a_dpc:.0f} pc)",
+                    ))
+                    _a_to_mv = float(np.interp(
+                        _a_to, _zams.B_V.values, _zams.M_V.values))
+                    _afig.add_vline(x=_a_to,
+                                    line=dict(color="orange", width=1.5,
+                                              dash="dot"))
+                    _afig.add_trace(go.Scatter(
+                        x=[_a_to], y=[_a_to_mv + _a_mu],
+                        mode="markers",
+                        marker=dict(size=14, color="orange", symbol="star"),
+                        name=f"턴오프 ({_format_age(_a_age)})",
+                    ))
+                    _afig.update_layout(
+                        xaxis_title="B − V",
+                        yaxis_title="V",
+                        yaxis=dict(autorange="reversed"),
+                        height=600,
+                        legend=dict(x=0.98, y=0.02, xanchor="right",
+                                    yanchor="bottom"),
+                        margin=dict(l=50, r=20, t=30, b=50),
+                    )
+                    st.plotly_chart(_afig, use_container_width=True,
+                                    key="ans_cmd_chart")
+
+                st.divider()
+                st.subheader("📋 정답 요약")
+                st.caption("M67 실제값: 거리 ~850–900 pc, 나이 ~3.5–4.0 Gyr, "
+                           "E(B-V) ≈ 0.04")
+                ar1, ar2, ar3 = st.columns(3)
+                with ar1:
+                    st.metric("추정 거리", f"{_a_dpc:.0f} pc")
+                with ar2:
+                    st.metric("추정 나이", _format_age(_a_age))
+                with ar3:
+                    st.metric("E(B−V)", f"{_a_ebv:.3f}")
+        else:
+            st.error("m67_answer.csv 파일을 찾을 수 없습니다.")
+    elif _ans_pw:
+        st.error("비밀번호가 틀렸습니다.")
